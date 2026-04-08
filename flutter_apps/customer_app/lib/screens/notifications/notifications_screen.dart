@@ -91,7 +91,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   @override
   Widget build(BuildContext context) {
     
-    final bg = JT.bgSoft;
+    final bg = Colors.white;
     final cardBg = Colors.white;
     final textColor = JT.textPrimary;
     final subColor = JT.textSecondary;
@@ -99,49 +99,55 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     return Scaffold(
       backgroundColor: bg,
       appBar: AppBar(
-        backgroundColor: _blue,
-        foregroundColor: Colors.white,
-        title: const Text('Notifications', style: TextStyle(fontWeight: FontWeight.w500)),
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        foregroundColor: JT.textPrimary,
+        title: const Text('Notifications', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
         elevation: 0,
+        centerTitle: false,
         actions: [
           if (_notifications.isNotEmpty)
             TextButton(
               onPressed: _markAllRead,
-              child: const Text('అన్నీ చదివాను', style: TextStyle(color: Colors.white70, fontSize: 12)),
+              style: TextButton.styleFrom(foregroundColor: _blue),
+              child: const Text('Mark all read', style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13)),
             ),
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: JT.primary))
+          ? const Center(child: CircularProgressIndicator(color: _blue))
           : _notifications.isEmpty
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.notifications_none_rounded, size: 80, color: subColor),
-                      const SizedBox(height: 16),
-                      Text('Notifications లేవు', style: TextStyle(color: subColor, fontSize: 16)),
+                      Container(
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(color: const Color(0xFFF1F5F9), shape: BoxShape.circle),
+                        child: Icon(Icons.notifications_none_rounded, size: 48, color: const Color(0xFF94A3B8)),
+                      ),
+                      const SizedBox(height: 24),
+                      Text('No Notifications Yet', style: TextStyle(color: textColor, fontSize: 18, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 8),
+                      Text('We\'ll let you know when something\nimportant happens.', textAlign: TextAlign.center, style: TextStyle(color: subColor, fontSize: 14)),
                     ],
                   ),
                 )
               : RefreshIndicator(
                   onRefresh: _fetch,
                   color: _blue,
+                  backgroundColor: Colors.white,
                   child: ListView.separated(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                     itemCount: _notifications.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, __) => const Divider(height: 16, color: Color(0xFFF1F5F9)),
                     itemBuilder: (_, i) {
                       final n = _notifications[i] as Map<String, dynamic>;
                       final isRead = n['is_read'] == true || n['isRead'] == true;
                       final type = n['type']?.toString();
                       final color = _colorForType(type);
                       return Container(
-                        decoration: BoxDecoration(
-                          color: isRead ? cardBg : (JT.surfaceAlt),
-                          borderRadius: BorderRadius.circular(14),
-                          border: isRead ? null : Border.all(color: _blue.withValues(alpha: 0.2)),
-                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 8),
                         child: ListTile(
                           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                           leading: Container(

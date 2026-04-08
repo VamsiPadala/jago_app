@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../config/jago_theme.dart';
 import '../../services/auth_service.dart';
 import '../home/home_screen.dart';
+import '../main_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -75,7 +76,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
     if (res['success'] == true) {
       Navigator.pushAndRemoveUntil(context,
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => const HomeScreen(),
+          pageBuilder: (_, __, ___) => const MainScreen(),
           transitionDuration: const Duration(milliseconds: 400),
           transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
         ),

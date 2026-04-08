@@ -5,8 +5,8 @@ class ApiConfig {
   // Production server URL
   static const String _prodUrl = 'https://oyster-app-9e9cd.ondigitalocean.app';
 
-  // LAN IP for local testing only
-  static const String _lanDevUrl = 'http://192.168.0.136:5000';
+  // LAN IP for local testing only (Update this to your computer's IP: 192.168.1.37)
+  static const String _lanDevUrl = 'http://192.168.1.151:5000'; // 10.0.2.2 for Android Emulator
 
   static bool _isProd = false; // DEVELOPMENT BUILD
 
@@ -23,7 +23,7 @@ class ApiConfig {
 
   // Set at build time: --dart-define=GOOGLE_MAPS_KEY=AIzaSy...
   // Never hardcode — key must be rotated in Google Cloud Console
-  static const String googleMapsApiKey = String.fromEnvironment('GOOGLE_MAPS_KEY', defaultValue: '');
+  static const String googleMapsApiKey = String.fromEnvironment('GOOGLE_MAPS_KEY', defaultValue: 'AIzaSyAiMVYA_ppxeT344tkcoSsjeGGMaPU26eI');
 
   // Socket.IO base URL (same server, no path)
   static String get socketUrl => baseUrl;

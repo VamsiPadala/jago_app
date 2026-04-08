@@ -369,7 +369,7 @@ class PrimaryGradientButton extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(18),
-          onPressed: onPressed,
+          onTap: onPressed,
           child: Center(
             child: Text(
               text,

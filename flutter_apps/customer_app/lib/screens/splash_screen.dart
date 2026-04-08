@@ -7,6 +7,7 @@ import '../config/jago_theme.dart';
 import '../services/auth_service.dart';
 import 'auth/login_screen.dart';
 import 'home/home_screen.dart';
+import 'main_screen.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'onboarding/terms_screen.dart';
 
@@ -98,7 +99,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       final profile = await AuthService.getProfile();
       if (!mounted) return;
       if (profile != null) {
-        destination = const HomeScreen();
+        destination = const MainScreen();
       } else {
         await prefs.remove('auth_token');
         await prefs.remove('user_data');

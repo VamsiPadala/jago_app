@@ -1069,7 +1069,7 @@ class _BookingScreenState extends State<BookingScreen> with TickerProviderStateM
                           child: Center(
                             child: _loading 
                                ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
-                               : const Text('Book Bike', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, letterSpacing: 0.5, color: Colors.white)),
+                               : Text('Book $_vehicleName', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, letterSpacing: 0.5, color: Colors.white)),
                           ),
                         ),
                       ),

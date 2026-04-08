@@ -8,6 +8,7 @@ import '../../config/jago_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firebase_otp_service.dart';
 import '../home/home_screen.dart';
+import '../main_screen.dart';
 
 class OtpScreen extends StatefulWidget {
   final String phone;
@@ -79,7 +80,7 @@ class _OtpScreenState extends State<OtpScreen> with SingleTickerProviderStateMix
       if (res['success'] == true || res['token'] != null) {
         Navigator.pushAndRemoveUntil(context,
           PageRouteBuilder(
-            pageBuilder: (_, __, ___) => const HomeScreen(),
+            pageBuilder: (_, __, ___) => const MainScreen(),
             transitionDuration: const Duration(milliseconds: 400),
             transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
           ),

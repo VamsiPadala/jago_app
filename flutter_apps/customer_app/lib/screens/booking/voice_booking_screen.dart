@@ -93,18 +93,23 @@ class _VoiceBookingScreenState extends State<VoiceBookingScreen>
 
   Future<void> _fetchCurrentLocation() async {
     try {
-      final perm = await Geolocator.checkPermission();
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
       if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
-      final pos = await Geolocator.getCurrentPosition(
+      var pos = await Geolocator.getLastKnownPosition();
+      pos ??= await Geolocator.getCurrentPosition(
+
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
       ).timeout(const Duration(seconds: 8));
       if (!mounted) return;
-      setState(() { _currentLat = pos.latitude; _currentLng = pos.longitude; });
+      setState(() { _currentLat = pos!.latitude; _currentLng = pos!.longitude; });
       // Try server proxy
       try {
         final headers = await AuthService.getHeaders();
         final r = await http.get(
-          Uri.parse('${ApiConfig.reverseGeocode}?lat=${pos.latitude}&lng=${pos.longitude}'),
+          Uri.parse('${ApiConfig.reverseGeocode}?lat=${pos!.latitude}&lng=${pos!.longitude}'),
           headers: headers,
         ).timeout(const Duration(seconds: 6));
         if (r.statusCode == 200) {
@@ -120,7 +125,7 @@ class _VoiceBookingScreenState extends State<VoiceBookingScreen>
       try {
         final r = await http.get(
           Uri.parse(
-              'https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos.latitude}&lon=${pos.longitude}'),
+              'https://nominatim.openstreetmap.org/reverse?format=json&lat=${pos!.latitude}&lon=${pos!.longitude}'),
           headers: const {'User-Agent': 'JagoPro/1.0'},
         ).timeout(const Duration(seconds: 5));
         if (r.statusCode == 200) {

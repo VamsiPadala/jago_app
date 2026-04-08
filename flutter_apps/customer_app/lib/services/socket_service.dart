@@ -48,6 +48,8 @@ class SocketService {
   bool get isConnected => _isConnected;
 
   Future<void> connect(String baseUrl) async {
+    // If already connected, no need to create a new socket — but caller may
+    // still call trackTrip() after this, which will work because _isConnected=true.
     if (_socket?.connected == true) return;
 
     final prefs = await SharedPreferences.getInstance();
@@ -235,11 +237,15 @@ class SocketService {
     _socket!.connect();
   }
 
-  // Start tracking a specific trip (also stored for reconnect recovery)
+  // Start tracking a specific trip (also stored for reconnect recovery).
+  // Emits immediately if connected; the stored ID ensures re-join on reconnect.
   void trackTrip(String tripId) {
     _activeTripId = tripId;
-    if (!_isConnected) return;
-    _socket!.emit('customer:track_trip', {'tripId': tripId});
+    // Always emit if socket exists (even if _isConnected flag not yet set)
+    if (_socket != null && (_isConnected || _socket!.connected)) {
+      _socket!.emit('customer:track_trip', {'tripId': tripId});
+    }
+    // If socket not ready yet, the connect handler will pick it up via _activeTripId
   }
 
   void clearActiveTrip() => _activeTripId = null;

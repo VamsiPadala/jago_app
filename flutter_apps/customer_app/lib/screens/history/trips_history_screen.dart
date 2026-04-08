@@ -12,6 +12,7 @@ import '../home/home_screen.dart';
 import '../wallet/wallet_screen.dart';
 import '../profile/profile_screen.dart';
 import '../notifications/notifications_screen.dart';
+import '../main_screen.dart';
 
 class TripsHistoryScreen extends StatefulWidget {
   const TripsHistoryScreen({super.key});
@@ -470,69 +471,9 @@ class _TripsHistoryScreenState extends State<TripsHistoryScreen>
             ),
           ),
           
-          SafeArea(
-            child: Column(
+          Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Top Bar
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 0), // Same as Home
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // Jago Logo (Left) - Opens Profile
-                      GestureDetector(
-                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfileScreen())),
-                        child: JT.logoWhite(height: 72),
-                      ),
-                      
-                      // Actions (Right): Wallet & Notifications
-                      Row(
-                        children: [
-                          // Wallet Button
-                          GestureDetector(
-                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WalletScreen())),
-                            child: Container(
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                boxShadow: [
-                                  BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 4)),
-                                ],
-                              ),
-                              child: const Icon(Icons.account_balance_wallet_outlined, color: Color(0xFF64748B), size: 24),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          // Notification Bell
-                          GestureDetector(
-                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const NotificationsScreen())),
-                            child: Container(
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                boxShadow: [
-                                  BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 4)),
-                                ],
-                              ),
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  const Icon(Icons.notifications_none_rounded, color: Color(0xFF64748B), size: 24),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                
                 const SizedBox(height: 12),
                 
                 // Trips Content (Header + Filters + List)
@@ -621,95 +562,12 @@ class _TripsHistoryScreenState extends State<TripsHistoryScreen>
                     ),
                   ),
                 ),
-
-                // Bottom Navigation
-                Container(
-                  margin: const EdgeInsets.fromLTRB(20, 10, 20, 20),
-                  height: 64,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(32),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      // Home (Inactive)
-                      GestureDetector(
-                        onTap: () => Navigator.pushReplacement(context, PageRouteBuilder(
-                          pageBuilder: (_, __, ___) => const HomeScreen(),
-                          transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-                          transitionDuration: const Duration(milliseconds: 200),
-                        )),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: const [
-                            Icon(Icons.home_outlined, color: Color(0xFF64748B), size: 22),
-                            SizedBox(height: 2),
-                            Text("Home", style: TextStyle(color: Color(0xFF64748B), fontSize: 10)),
-                          ],
-                        ),
-                      ),
-                      // Trips (Active)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
-                            colors: [Color(0xFF6366F1), Color(0xFF4B4AD2)],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          children: const [
-                            Icon(Icons.inbox_outlined, color: Colors.white, size: 18),
-                            SizedBox(width: 6),
-                            Text("Trips", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
-                          ],
-                        ),
-                      ),
-                      // Wallet (Inactive)
-                      GestureDetector(
-                        onTap: () => Navigator.pushReplacement(context, PageRouteBuilder(
-                          pageBuilder: (_, __, ___) => const WalletScreen(),
-                          transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-                          transitionDuration: const Duration(milliseconds: 200),
-                        )),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: const [
-                            Icon(Icons.account_balance_wallet_outlined, color: Color(0xFF64748B), size: 22),
-                            SizedBox(height: 2),
-                            Text("Wallet", style: TextStyle(color: Color(0xFF64748B), fontSize: 10)),
-                          ],
-                        ),
-                      ),
-                      // Profile (Inactive)
-                      GestureDetector(
-                        onTap: () => Navigator.pushReplacement(context, PageRouteBuilder(
-                          pageBuilder: (_, __, ___) => const ProfileScreen(),
-                          transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-                          transitionDuration: const Duration(milliseconds: 200),
-                        )),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: const [
-                            Icon(Icons.person_outline, color: Color(0xFF64748B), size: 22),
-                            SizedBox(height: 2),
-                            Text("Profile", style: TextStyle(color: Color(0xFF64748B), fontSize: 10)),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
               ],
             ),
-          ),
-        ],
-      ),
-    );
-  }
+          ],
+        ),
+      );
+    }
 
   Widget _headerStat(String value, String label, IconData icon, Color color) {
     return Expanded(
@@ -857,9 +715,10 @@ class _TripsHistoryScreenState extends State<TripsHistoryScreen>
               width: 190,
               child: JT.gradientButton(
                 label: 'Book a Ride',
-                onTap: () => Navigator.push(
+                onTap: () => Navigator.pushAndRemoveUntil(
                   context,
-                  MaterialPageRoute(builder: (_) => const HomeScreen()),
+                  MaterialPageRoute(builder: (_) => const MainScreen()),
+                  (_) => false,
                 ),
               ),
             ),

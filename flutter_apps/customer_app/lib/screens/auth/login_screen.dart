@@ -7,6 +7,7 @@ import '../../config/jago_theme.dart';
 import '../../services/auth_service.dart';
 import '../../services/firebase_otp_service.dart';
 import '../home/home_screen.dart';
+import '../main_screen.dart';
 import 'register_screen.dart';
 import 'forgot_password_screen.dart';
 
@@ -144,7 +145,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         final res = await AuthService.verifyFirebaseToken(idToken, phone, 'customer');
         if (mounted && (res['success'] == true || res['token'] != null)) {
           Navigator.pushAndRemoveUntil(context,
-            MaterialPageRoute(builder: (_) => const HomeScreen()), (_) => false);
+            MaterialPageRoute(builder: (_) => const MainScreen()), (_) => false);
         }
       },
     );
@@ -183,7 +184,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       if (!mounted) return;
       setState(() => _loading = false);
       if (res['success'] == true || res['token'] != null) {
-        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const HomeScreen()), (_) => false);
+        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const MainScreen()), (_) => false);
       } else {
         _otpCtrl.clear();
         _showErrorDialog('Login Failed', res['message'] ?? 'Firebase verification failed. Please try again.');
@@ -206,7 +207,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     if (!mounted) return;
     setState(() => _loading = false);
     if (res['success'] == true || res['token'] != null) {
-      Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const HomeScreen()), (_) => false);
+      Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const MainScreen()), (_) => false);
     } else {
       _snack(res['message'] ?? 'Login failed', error: true);
     }

@@ -2,13 +2,16 @@ import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import '../../config/api_config.dart';
 import '../../config/jago_theme.dart';
 import '../../services/auth_service.dart';
+import 'package:geolocator/geolocator.dart';
 import '../tracking/tracking_screen.dart';
+
+import 'map_location_picker.dart';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JAGO Pro Logistics — Porter-style parcel booking screen
@@ -91,10 +94,6 @@ const _kWeightOptions = [
   {'label': '200+ kg', 'value': 400.0,'desc': 'Heavy / commercial load'},
 ];
 
-// ── Prohibited items ─────────────────────────────────────────────────────────
-const _kProhibited = ['Weapons & ammunition', 'Drugs & narcotics',
-  'Explosives', 'Hazardous chemicals', 'Counterfeit goods', 'Illegal items'];
-
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ParcelBookingScreenState extends State<ParcelBookingScreen>
@@ -119,11 +118,16 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
   // Dynamic vehicles from backend (overrides _kVehicles when loaded)
   List<_ParcelVehicle> _dynamicVehicles = [];
 
+  // Pickup location
+  late String _pickupAddr;
+  late double _pickupLat;
+  late double _pickupLng;
+
   // Drop location
   double _destLat = 0, _destLng = 0;
   List<Map<String, dynamic>> _suggestions = [];
   Timer? _debounce;
-  bool _searchingDrop = false;
+
 
   // Fare estimate
   Map<String, dynamic>? _estimate;
@@ -139,6 +143,9 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
   @override
   void initState() {
     super.initState();
+    _pickupAddr = widget.pickupAddress;
+    _pickupLat  = widget.pickupLat;
+    _pickupLng  = widget.pickupLng;
     _fetchDynamicVehicles();
     if (widget.initialVehicleKey != null) {
       final idx = _kVehicles.indexWhere((v) => v.key == widget.initialVehicleKey);
@@ -150,10 +157,10 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
   Future<void> _fetchDynamicVehicles() async {
     try {
       final uri = Uri.parse(ApiConfig.parcelVehicles).replace(queryParameters: {
-        'lat': widget.pickupLat.toString(),
-        'lng': widget.pickupLng.toString(),
+        'lat': _pickupLat.toString(),
+        'lng': _pickupLng.toString(),
       });
-      final r = await http.get(uri);
+      final r = await http.get(uri).timeout(const Duration(seconds: 30));
       if (r.statusCode == 200) {
         final data = jsonDecode(r.body) as Map<String, dynamic>;
         final list = (data['vehicles'] as List<dynamic>?) ?? [];
@@ -258,13 +265,12 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
   }
 
   Future<void> _searchAddress(String q) async {
-    setState(() => _searchingDrop = true);
     try {
       final headers = await AuthService.getHeaders();
       final r = await http.get(
         Uri.parse('${ApiConfig.baseUrl}/api/app/places/autocomplete?input=${Uri.encodeComponent(q)}'),
         headers: headers,
-      ).timeout(const Duration(seconds: 6));
+      ).timeout(const Duration(seconds: 30));
       if (r.statusCode == 200) {
         final body = jsonDecode(r.body);
         final list = (body['predictions'] ?? body['results'] ?? body) as List;
@@ -278,7 +284,6 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
         });
       }
     } catch (_) {}
-    if (mounted) setState(() => _searchingDrop = false);
   }
 
   void _selectSuggestion(Map<String, dynamic> s) async {
@@ -315,7 +320,7 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
     try {
       // Rough haversine distance
       final dist = _haversine(
-        widget.pickupLat, widget.pickupLng, _destLat, _destLng);
+        _pickupLat, _pickupLng, _destLat, _destLng);
       final headers = await AuthService.getHeaders();
       final r = await http.post(
         Uri.parse(ApiConfig.parcelQuote),
@@ -324,11 +329,11 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
           'vehicleCategory': _vehicle.key,
           'totalDistanceKm': dist,
           'weightKg': _weightKg,
-          'pickupLat': widget.pickupLat,
-          'pickupLng': widget.pickupLng,
+          'pickupLat': _pickupLat,
+          'pickupLng': _pickupLng,
           'dropLocations': [{'address': _dropAddressCtrl.text}],
         }),
-      ).timeout(const Duration(seconds: 8));
+      ).timeout(const Duration(seconds: 30));
       if (r.statusCode == 200 && mounted) {
         setState(() => _estimate = jsonDecode(r.body));
       } else if (r.statusCode == 400 && mounted) {
@@ -359,16 +364,16 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
     if (!_step3Valid || _booking) return;
     setState(() => _booking = true);
     try {
-      final dist = _haversine(widget.pickupLat, widget.pickupLng, _destLat, _destLng);
+      final dist = _haversine(_pickupLat, _pickupLng, _destLat, _destLng);
       final headers = await AuthService.getHeaders();
       final r = await http.post(
         Uri.parse(ApiConfig.parcelBook),
         headers: {...headers, 'Content-Type': 'application/json'},
         body: jsonEncode({
           'vehicleCategory': _vehicle.key,
-          'pickupAddress': widget.pickupAddress,
-          'pickupLat': widget.pickupLat,
-          'pickupLng': widget.pickupLng,
+          'pickupAddress': _pickupAddr,
+          'pickupLat': _pickupLat,
+          'pickupLng': _pickupLng,
           'pickupContactName': '',
           'pickupContactPhone': '',
           'dropLocations': [{
@@ -387,7 +392,7 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
             if (_instructionsCtrl.text.trim().isNotEmpty) 'Instructions: ${_instructionsCtrl.text.trim()}',
           ].join(' | '),
         }),
-      ).timeout(const Duration(seconds: 12));
+      ).timeout(const Duration(seconds: 30));
       if (!mounted) return;
       if (r.statusCode == 200 || r.statusCode == 201) {
         final data = jsonDecode(r.body);
@@ -406,6 +411,75 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
     }
   }
 
+  Future<void> _pickPickupOnMap() async {
+    final result = await Navigator.push<PickedLocation>(
+      context,
+      MaterialPageRoute(builder: (_) => MapLocationPicker(
+        title: 'Select Pickup Location',
+        initialLat: _pickupLat,
+        initialLng: _pickupLng,
+      )),
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _pickupAddr = result.address;
+        _pickupLat = result.lat;
+        _pickupLng = result.lng;
+      });
+      _fetchDynamicVehicles();
+    }
+  }
+
+  Future<void> _pickDropOnMap() async {
+    final result = await Navigator.push<PickedLocation>(
+      context,
+      MaterialPageRoute(builder: (_) => MapLocationPicker(
+        title: 'Select Delivery Location',
+        initialLat: _destLat != 0 ? _destLat : _pickupLat,
+        initialLng: _destLng != 0 ? _destLng : _pickupLng,
+      )),
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _dropAddressCtrl.text = result.address;
+        _destLat = result.lat;
+        _destLng = result.lng;
+        _suggestions = [];
+      });
+    }
+  }
+
+  Future<void> _useCurrentLocationForPickup() async {
+    try {
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        _showSnack('Location permission required', error: true);
+        return;
+      }
+      
+      var pos = await Geolocator.getLastKnownPosition();
+      if (pos == null || pos.latitude == 0) {
+        pos = await Geolocator.getCurrentPosition();
+      }
+      setState(() {
+        _pickupLat = pos!.latitude;
+        _pickupLng = pos!.longitude;
+        _pickupAddr = 'Detecting address...';
+      });
+      // Reverse geocode
+      final headers = await AuthService.getHeaders();
+      final r = await http.get(Uri.parse('${ApiConfig.reverseGeocode}?lat=${pos!.latitude}&lng=${pos!.longitude}'), headers: headers);
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body);
+        if (mounted) setState(() => _pickupAddr = data['formattedAddress']?.toString() ?? 'Current Location');
+      }
+      _fetchDynamicVehicles();
+    } catch (_) {}
+  }
+
   void _showSnack(String msg, {bool error = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -420,13 +494,17 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
   // BUILD
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // Local theme colors for Logistics (Orange-focused)
+  static const Color logisticsOrange = Color(0xFFFF6B35);
+  static const Color logisticsOrangeLight = Color(0xFFFFF1EB);
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: JT.bg,
+      backgroundColor: Colors.white,
       body: Column(children: [
-        _buildHeader(),
-        _buildStepBar(),
+        _buildNewHeader(),
+        _buildNewStepBar(),
         Expanded(
           child: PageView(
             controller: _pageCtrl,
@@ -439,140 +517,836 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
             ],
           ),
         ),
-        _buildBottomBar(),
+        _buildNewBottomButton(),
       ]),
     );
   }
 
-  // ── Header ────────────────────────────────────────────────────────────────────
-
-  Widget _buildHeader() {
+  // ── New Premium Header ────────────────────────────────────────────────────────
+  Widget _buildNewHeader() {
     return Container(
-      decoration: BoxDecoration(gradient: JT.grad),
+      width: double.infinity,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [logisticsOrange, Color(0xFFFF8C5F)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 4, 16, 16),
-          child: Row(children: [
-            IconButton(
-              icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-              onPressed: _back,
-            ),
-            const SizedBox(width: 4),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('JAGO Pro Logistics', style: GoogleFonts.poppins(
-                  color: Colors.white, fontSize: 18, fontWeight: FontWeight.w400)),
-              Text('Porter-style parcel delivery', style: GoogleFonts.poppins(
-                  color: Colors.white70, fontSize: 12)),
-            ]),
-            const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.2),
-                  borderRadius: BorderRadius.circular(20)),
-              child: Row(children: [
-                const Text('📦', style: TextStyle(fontSize: 14)),
+          padding: const EdgeInsets.fromLTRB(8, 8, 16, 24),
+          child: Column(
+            children: [
+              Row(children: [
+                IconButton(
+                  icon: const Icon(Icons.arrow_back_rounded, color: Colors.white, size: 24),
+                  onPressed: _back,
+                ),
                 const SizedBox(width: 4),
-                Text('Logistics', style: GoogleFonts.poppins(
-                    color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'JAGO Pro Logistics',
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        'Porter-style parcel delivery',
+                        style: GoogleFonts.poppins(
+                          color: Colors.white.withValues(alpha: 0.8),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.25),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.inventory_2_rounded, color: Colors.white, size: 14),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Logistics',
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ]),
-            ),
-          ]),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  // ── Step bar ──────────────────────────────────────────────────────────────────
+  // ── New Premium Step Bar ────────────────────────────────────────────────────────
+  Widget _buildNewStepBar() {
+    final steps = ['Vehicle', 'Location', 'Package', 'Confirm'];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
+      child: Row(
+        children: List.generate(steps.length, (i) {
+          final isCompleted = i < _step;
+          final isActive = i == _step;
+          final isLast = i == steps.length - 1;
 
-  Widget _buildStepBar() {
-    const labels = ['Vehicle', 'Location', 'Package', 'Confirm'];
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      child: Row(children: List.generate(4, (i) {
-        final done = i < _step;
-        final active = i == _step;
-        return Expanded(child: Row(children: [
-          Column(children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 250),
-              width: 28, height: 28,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: done ? JT.success : active ? JT.primary : JT.bgSoft,
-                border: Border.all(
-                  color: done ? JT.success : active ? JT.primary : JT.border,
-                  width: 2),
-              ),
-              child: Center(child: done
-                ? const Icon(Icons.check, color: Colors.white, size: 14)
-                : Text('${i + 1}', style: GoogleFonts.poppins(
-                    color: active ? JT.primary : JT.iconInactive,
-                    fontSize: 12, fontWeight: FontWeight.w500))),
+          return Expanded(
+            child: Row(
+              children: [
+                Column(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isActive || isCompleted ? logisticsOrange : Colors.white,
+                        border: Border.all(
+                          color: isActive || isCompleted ? logisticsOrange : const Color(0xFFE5E7EB),
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Center(
+                        child: isCompleted
+                            ? const Icon(Icons.check, color: Colors.white, size: 16)
+                            : Text(
+                                '${i + 1}',
+                                style: GoogleFonts.poppins(
+                                  color: isActive ? Colors.white : const Color(0xFF9CA3AF),
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      steps[i],
+                      style: GoogleFonts.poppins(
+                        fontSize: 11,
+                        fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+                        color: isActive ? logisticsOrange : const Color(0xFF9CA3AF),
+                      ),
+                    ),
+                  ],
+                ),
+                if (!isLast)
+                  Expanded(
+                    child: Container(
+                      height: 1,
+                      margin: const EdgeInsets.only(bottom: 22, left: 8, right: 8),
+                      color: isCompleted ? logisticsOrange : const Color(0xFFE5E7EB),
+                    ),
+                  ),
+              ],
             ),
-            const SizedBox(height: 4),
-            Text(labels[i], style: GoogleFonts.poppins(
-                fontSize: 9, fontWeight: FontWeight.w400,
-                color: active ? JT.primary : done ? JT.success : JT.iconInactive)),
-          ]),
-          if (i < 3) Expanded(child: Container(
-            height: 2, margin: const EdgeInsets.only(bottom: 18),
-            color: done ? JT.success : JT.border)),
-        ]));
-      })),
+          );
+        }),
+      ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // STEP 0 — Vehicle selection
+  // STEP 0 — Vehicle selection (Redesigned)
   // ─────────────────────────────────────────────────────────────────────────────
 
   Widget _buildStep0Vehicle() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Choose Your Vehicle', style: GoogleFonts.poppins(
-            fontSize: 20, fontWeight: FontWeight.w400, color: JT.textPrimary)),
-        const SizedBox(height: 4),
-        Text('Select based on your package size and weight',
-            style: GoogleFonts.poppins(fontSize: 13, color: JT.textSecondary)),
-        const SizedBox(height: 20),
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Choose Your Vehicle',
+            style: GoogleFonts.poppins(
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              color: const Color(0xFF1F2937),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Select based on your package size and weight',
+            style: GoogleFonts.poppins(
+              fontSize: 14,
+              color: const Color(0xFF6B7280),
+            ),
+          ),
+          const SizedBox(height: 24),
 
-        // Vehicle cards
-        ...List.generate(_vehicles.length, (i) => _buildVehicleCard(i)),
-
-        const SizedBox(height: 24),
-        // What is Logistics section
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: JT.bgSoft,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: JT.border)),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              const Text('🚚', style: TextStyle(fontSize: 20)),
-              const SizedBox(width: 8),
-              Text('About JAGO Pro Logistics', style: GoogleFonts.poppins(
-                  fontSize: 14, fontWeight: FontWeight.w500, color: JT.textPrimary)),
-            ]),
-            const SizedBox(height: 10),
-            for (final point in [
-              '📍 Door-to-door parcel delivery',
-              '🔐 OTP-verified secure pickup & delivery',
-              '📡 Live GPS tracking throughout',
-              '💰 Transparent pricing, no hidden charges',
-            ])
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text(point, style: GoogleFonts.poppins(
-                    fontSize: 12, color: JT.textSecondary)),
+          // Vehicle list
+          ...List.generate(_vehicles.length, (idx) {
+            final v = _vehicles[idx];
+            final isSelected = _vehicleIdx == idx;
+            return GestureDetector(
+              onTap: () => setState(() => _vehicleIdx = idx),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: isSelected ? logisticsOrange.withValues(alpha: 0.03) : Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: isSelected ? logisticsOrange : const Color(0xFFE5E7EB).withValues(alpha: 0.8),
+                    width: isSelected ? 1.5 : 1,
+                  ),
+                  boxShadow: isSelected 
+                    ? [BoxShadow(color: logisticsOrange.withValues(alpha: 0.1), blurRadius: 10, offset: const Offset(0, 4))]
+                    : [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 4, offset: const Offset(0, 2))],
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        color: v.accentColor.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Center(
+                        child: Icon(
+                          _iconForKey(v.key),
+                          color: v.accentColor,
+                          size: 32,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                v.name,
+                                style: GoogleFonts.poppins(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: const Color(0xFF111827),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: v.accentColor.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  v.capacity,
+                                  style: GoogleFonts.poppins(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: v.accentColor,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            v.subtitle,
+                            style: GoogleFonts.poppins(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                              color: const Color(0xFF4B5563),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            v.suitable,
+                            style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: const Color(0xFF9CA3AF),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      width: 20,
+                      height: 20,
+                      margin: const EdgeInsets.only(top: 4),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isSelected ? logisticsOrange : Colors.white,
+                        border: Border.all(
+                          color: isSelected ? logisticsOrange : const Color(0xFFD1D5DB),
+                          width: 1.5,
+                        ),
+                      ),
+                      child: isSelected 
+                        ? const Icon(Icons.check, color: Colors.white, size: 14)
+                        : null,
+                    ),
+                  ],
+                ),
               ),
+            );
+          }),
+
+          const SizedBox(height: 20),
+
+          // About Card
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF9FAFB),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFF3F4F6)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.local_shipping, color: Color(0xFF374151), size: 20),
+                    const SizedBox(width: 10),
+                    Text(
+                      'About JAGO Pro Logistics',
+                      style: GoogleFonts.poppins(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFF1F2937),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _buildInfoPoint(Icons.location_on_outlined, 'Door-to-door parcel delivery'),
+                _buildInfoPoint(Icons.lock_outline, 'OTP-verified secure pickup & delivery'),
+                _buildInfoPoint(Icons.track_changes, 'Live GPS tracking throughout'),
+                _buildInfoPoint(Icons.currency_bitcoin, 'Transparent pricing, no hidden charges'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 100), // Spacing for bottom button
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoPoint(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Icon(icon, color: logisticsOrange, size: 16),
+          const SizedBox(width: 12),
+          Text(
+            text,
+            style: GoogleFonts.poppins(
+              fontSize: 13,
+              color: const Color(0xFF4B5563),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── STEP 1 — Pickup & Drop locations (Redesigned) ──────────────────────────
+
+  Widget _buildStep1Location() {
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 0),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Pickup & Delivery', style: GoogleFonts.poppins(
+            fontSize: 22, fontWeight: FontWeight.w600, color: const Color(0xFF1F2937))),
+        const SizedBox(height: 4),
+        Text('Confirm pickup and enter delivery address',
+            style: GoogleFonts.poppins(fontSize: 14, color: const Color(0xFF6B7280))),
+        const SizedBox(height: 32),
+
+        // ── Pickup Card ──
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFFE5E7EB).withValues(alpha: 0.8)),
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))],
+          ),
+          child: Column(
+            children: [
+              Row(children: [
+                Container(
+                  width: 44, height: 44,
+                  decoration: const BoxDecoration(color: logisticsOrange, shape: BoxShape.circle),
+                  child: const Icon(Icons.my_location, color: Colors.white, size: 20)),
+                const SizedBox(width: 16),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('PICKUP LOCATION', style: GoogleFonts.poppins(
+                          fontSize: 10, color: logisticsOrange,
+                          fontWeight: FontWeight.w700, letterSpacing: 1)),
+                      GestureDetector(
+                        onTap: _useCurrentLocationForPickup,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: logisticsOrange.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: logisticsOrange.withValues(alpha: 0.2)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.gps_fixed, size: 10, color: logisticsOrange),
+                              const SizedBox(width: 4),
+                              Text('Use Current', style: GoogleFonts.poppins(
+                                fontSize: 10, color: logisticsOrange, fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(_pickupAddr, style: GoogleFonts.poppins(
+                      fontSize: 15, color: const Color(0xFF111827), fontWeight: FontWeight.w500),
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                ])),
+              ]),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildLocationSubBtn(Icons.map_outlined, 'Pick on Map', _pickPickupOnMap),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildLocationSubBtn(Icons.edit_outlined, 'Enter Manually', () {
+                      // Already has a direct text field if not set, 
+                      // if set, we could clear and focus
+                    }),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        // ── Connector (Dotted) ──
+        Padding(
+          padding: const EdgeInsets.only(left: 45),
+          child: Column(
+            children: List.generate(4, (i) => Container(
+              width: 1.5,
+              height: 5,
+              margin: const EdgeInsets.symmetric(vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE5E7EB),
+                borderRadius: BorderRadius.circular(1),
+              ),
+            )),
+          ),
+        ),
+
+        // ── Drop / Delivery Card ──
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+          decoration: BoxDecoration(
+            color: _destLat != 0 ? logisticsOrange.withValues(alpha: 0.01) : Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: _destLat != 0 ? logisticsOrange.withValues(alpha: 0.3) : const Color(0xFFE5E7EB).withValues(alpha: 0.8)),
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))],
+          ),
+          child: Column(
+            children: [
+              Row(children: [
+                Container(
+                  width: 44, height: 44,
+                  decoration: BoxDecoration(
+                    color: _destLat != 0 ? logisticsOrange : const Color(0xFFF3F4F6),
+                    shape: BoxShape.circle),
+                  child: Icon(_destLat != 0 ? Icons.check : Icons.location_on_rounded,
+                      color: _destLat != 0 ? Colors.white : const Color(0xFF9CA3AF), size: 22)),
+                const SizedBox(width: 16),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('DELIVERY LOCATION', style: GoogleFonts.poppins(
+                          fontSize: 10, color: _destLat != 0 ? logisticsOrange : const Color(0xFF6B7280),
+                          fontWeight: FontWeight.w700, letterSpacing: 1)),
+                      Icon(Icons.keyboard_arrow_up_rounded, color: const Color(0xFF9CA3AF), size: 20),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  _destLat == 0 
+                  ? TextField(
+                      controller: _dropAddressCtrl,
+                      onChanged: _onDropSearch,
+                      style: GoogleFonts.poppins(fontSize: 14, color: const Color(0xFF111827), fontWeight: FontWeight.w500),
+                      decoration: InputDecoration(
+                        hintText: 'Select delivery location',
+                        hintStyle: GoogleFonts.poppins(color: const Color(0xFF9CA3AF), fontSize: 13),
+                        isDense: true,
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    )
+                  : Text(_dropAddressCtrl.text, style: GoogleFonts.poppins(
+                      fontSize: 15, color: const Color(0xFF111827), fontWeight: FontWeight.w500),
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                ])),
+              ]),
+              
+              if (_suggestions.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Divider(height: 1, color: Color(0xFFF3F4F6)),
+                ..._suggestions.take(3).map((s) => ListTile(
+                  onTap: () => _selectSuggestion(s),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.location_on_outlined, size: 18, color: Color(0xFF9CA3AF)),
+                  title: Text(s['description'] ?? '', 
+                    style: GoogleFonts.poppins(fontSize: 12, color: const Color(0xFF4B5563)),
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                )),
+              ],
+
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildLocationSubBtn(Icons.map_outlined, 'Pick on Map', _pickDropOnMap),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildLocationSubBtn(Icons.edit_outlined, 'Enter Manually', () {
+                       // Handled by direct text field
+                    }),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 32),
+
+        // ── Vehicle Reminder ──
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: _vehicle.accentColor.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: _vehicle.accentColor.withValues(alpha: 0.1))),
+          child: Row(children: [
+            Container(
+              width: 52, height: 52,
+              decoration: BoxDecoration(
+                  color: _vehicle.accentColor.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(14)),
+              child: Icon(_iconForKey(_vehicle.key), color: _vehicle.accentColor, size: 28)),
+            const SizedBox(width: 16),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(_vehicle.name, style: GoogleFonts.poppins(
+                  fontSize: 15, fontWeight: FontWeight.w600, color: const Color(0xFF1F2937))),
+              Text(_vehicle.capacity, style: GoogleFonts.poppins(
+                  fontSize: 13, color: const Color(0xFF6B7280))),
+            ])),
+            Icon(Icons.chevron_right_rounded, color: const Color(0xFF9CA3AF), size: 24),
           ]),
         ),
+        const SizedBox(height: 100),
       ]),
+    );
+  }
+
+  Widget _buildLocationSubBtn(IconData icon, String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF9FAFB),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFF3F4F6)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: logisticsOrange.withValues(alpha: 0.8)),
+            const SizedBox(width: 8),
+            Text(label, style: GoogleFonts.poppins(
+              fontSize: 13, color: const Color(0xFF4B5563), fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── STEP 2 — Package details (Redesigned) ──────────────────────────────────
+
+  Widget _buildStep2Package() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Package Details', style: GoogleFonts.poppins(
+            fontSize: 22, fontWeight: FontWeight.w600, color: const Color(0xFF1F2937))),
+        const SizedBox(height: 4),
+        Text('What are you sending today?',
+            style: GoogleFonts.poppins(fontSize: 14, color: const Color(0xFF6B7280))),
+        const SizedBox(height: 24),
+
+        Text('ITEM TYPE', style: GoogleFonts.poppins(
+            fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFF374151), letterSpacing: 0.5)),
+        const SizedBox(height: 12),
+        Wrap(spacing: 10, runSpacing: 10, children: _kItemTypes.map((t) {
+          final sel = _itemType == t['label'];
+          return GestureDetector(
+            onTap: () => setState(() => _itemType = t['label'] as String),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: sel ? logisticsOrange : Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: sel ? logisticsOrange : const Color(0xFFE5E7EB)),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(_itemTypeIcon(t['icon']!), color: sel ? Colors.white : const Color(0xFF4B5563), size: 18),
+                const SizedBox(width: 8),
+                Text(t['label']!, style: GoogleFonts.poppins(
+                    fontSize: 13, color: sel ? Colors.white : const Color(0xFF4B5563), fontWeight: sel ? FontWeight.w600 : FontWeight.w400)),
+              ]),
+            ),
+          );
+        }).toList()),
+
+        const SizedBox(height: 32),
+        Text('APPROXIMATE WEIGHT', style: GoogleFonts.poppins(
+            fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFF374151), letterSpacing: 0.5)),
+        const SizedBox(height: 12),
+        ...List.generate(_kWeightOptions.length, (i) {
+          final opt = _kWeightOptions[i];
+          final sel = _weightIdx == i;
+          final exceeds = (opt['value'] as num).toDouble() > _vehicle.maxKg;
+          return Opacity(
+            opacity: exceeds ? 0.4 : 1.0,
+            child: GestureDetector(
+              onTap: exceeds ? null : () => setState(() => _weightIdx = i),
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: sel ? logisticsOrange.withValues(alpha: 0.05) : Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: sel ? logisticsOrange : const Color(0xFFE5E7EB)),
+                ),
+                child: Row(children: [
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(opt['label'] as String, style: GoogleFonts.poppins(
+                        fontSize: 14, fontWeight: FontWeight.w600, color: const Color(0xFF111827))),
+                    Text(opt['desc'] as String, style: GoogleFonts.poppins(
+                        fontSize: 12, color: const Color(0xFF6B7280))),
+                  ])),
+                  if (sel) const Icon(Icons.check_circle, color: logisticsOrange, size: 20),
+                ]),
+              ),
+            ),
+          );
+        }),
+
+        const SizedBox(height: 24),
+        Text('PACKAGE DESCRIPTION (OPTIONAL)', style: GoogleFonts.poppins(
+            fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFF374151), letterSpacing: 0.5)),
+        const SizedBox(height: 12),
+        _buildStepTextField(_descCtrl, 'e.g. 55 inch TV, wrapped in bubble wrap', Icons.edit_note_rounded),
+
+        const SizedBox(height: 24),
+        Row(children: [
+          Checkbox(
+            value: _safetyAgreed,
+            activeColor: logisticsOrange,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+            onChanged: (v) => setState(() => _safetyAgreed = v ?? false)),
+          Expanded(child: GestureDetector(
+            onTap: () => setState(() => _safetyAgreed = !_safetyAgreed),
+            child: Text('I confirm the package contains no prohibited items',
+              style: GoogleFonts.poppins(fontSize: 13, color: const Color(0xFF4B5563))),
+          )),
+        ]),
+      ]),
+    );
+  }
+
+  // ── STEP 3 — Confirm details (Redesigned) ──────────────────────────────────
+
+  Widget _buildStep3Confirm() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Receiver Details', style: GoogleFonts.poppins(
+            fontSize: 22, fontWeight: FontWeight.w600, color: const Color(0xFF1F2937))),
+        const SizedBox(height: 4),
+        Text('Who should we contact at delivery?',
+            style: GoogleFonts.poppins(fontSize: 14, color: const Color(0xFF6B7280))),
+        const SizedBox(height: 24),
+
+        _buildStepTextField(_receiverNameCtrl, 'Receiver Name', Icons.person_outline),
+        const SizedBox(height: 16),
+        _buildStepTextField(_receiverPhoneCtrl, 'Phone Number', Icons.phone_android_outlined, keyboard: TextInputType.phone),
+        const SizedBox(height: 16),
+        _buildStepTextField(_instructionsCtrl, 'Delivery Instructions (Optional)', Icons.notes, lines: 3),
+
+        const SizedBox(height: 32),
+        if (_estimate != null) _buildNewFareCard(),
+        const SizedBox(height: 100),
+      ]),
+    );
+  }
+
+  // ── Fare Card (Redesigned) ──────────────────────────────────────────────────
+
+  Widget _buildNewFareCard() {
+    final e = _estimate!;
+    final total = (e['grandTotal'] ?? e['totalFare'] ?? 0);
+    
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: logisticsOrange.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: logisticsOrange.withValues(alpha: 0.2))),
+      child: Column(children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text('Total Bill Amount', style: GoogleFonts.poppins(fontSize: 15, color: const Color(0xFF1F2937))),
+          Text('₹$total', style: GoogleFonts.poppins(
+              fontSize: 24, fontWeight: FontWeight.w700, color: logisticsOrange)),
+        ]),
+        const Divider(height: 24),
+        _fareMiniRow('Base Fare', '₹${e['baseFare'] ?? 0}'),
+        _fareMiniRow('Distance Charge', '₹${e['distanceFare'] ?? 0}'),
+        _fareMiniRow('Weight Charge', '₹${e['weightFare'] ?? 0}'),
+        if ((e['loadingCharge'] ?? 0) > 0)
+          _fareMiniRow('Loading Charge', '₹${e['loadingCharge']}'),
+        const Divider(height: 24),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text('Distance', style: GoogleFonts.poppins(fontSize: 13, color: const Color(0xFF6B7280))),
+          Text('${e['distance']} km', style: GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w600)),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _fareMiniRow(String label, String val) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(label, style: GoogleFonts.poppins(fontSize: 13, color: const Color(0xFF6B7280))),
+        Text(val, style: GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w500, color: const Color(0xFF1F2937))),
+      ]),
+    );
+  }
+
+  // ── Bottom Navigation Button ────────────────────────────────────────────────
+
+  Widget _buildNewBottomButton() {
+    final canGoNext = _canNext;
+    String label = '';
+    
+    switch (_step) {
+      case 0: label = 'Confirm ${_vehicle.name}'; break;
+      case 1: label = 'Add Package Details'; break;
+      case 2: label = 'Review & Book'; break;
+      case 3: label = 'Book My Delivery'; break;
+    }
+
+    return Container(
+      padding: EdgeInsets.fromLTRB(24, 16, 24, 16 + MediaQuery.of(context).padding.bottom),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, -5),
+          ),
+        ],
+      ),
+      child: GestureDetector(
+        onTap: canGoNext ? (_step == 3 ? _book : _next) : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          height: 60,
+          decoration: BoxDecoration(
+            color: canGoNext ? logisticsOrange : const Color(0xFFE5E7EB),
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: canGoNext ? [
+              BoxShadow(
+                color: logisticsOrange.withValues(alpha: 0.3),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              )
+            ] : null,
+          ),
+          child: Center(
+            child: _booking || _estimating
+              ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+              : Text(
+                  label,
+                  style: GoogleFonts.poppins(
+                    color: canGoNext ? Colors.white : const Color(0xFF9CA3AF),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Shared UI Components ───────────────────────────────────────────────────
+
+  Widget _buildStepTextField(TextEditingController ctrl, String hint, IconData icon, 
+      {TextInputType keyboard = TextInputType.text, int lines = 1}) {
+    return TextField(
+      controller: ctrl,
+      keyboardType: keyboard,
+      maxLines: lines,
+      style: GoogleFonts.poppins(fontSize: 14, color: const Color(0xFF111827)),
+      onChanged: (_) => setState(() {}),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: GoogleFonts.poppins(fontSize: 13, color: const Color(0xFF9CA3AF)),
+        prefixIcon: Icon(icon, color: const Color(0xFF9CA3AF), size: 20),
+        filled: true,
+        fillColor: const Color(0xFFF9FAFB),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: const BorderSide(color: logisticsOrange, width: 1.5)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      ),
     );
   }
 
@@ -594,774 +1368,5 @@ class _ParcelBookingScreenState extends State<ParcelBookingScreen>
       case 'fragile': return Icons.local_drink_rounded;
       default: return Icons.inventory_2_rounded;
     }
-  }
-
-  Widget _buildVehicleCard(int idx) {
-    final v = _vehicles[idx];
-    final selected = _vehicleIdx == idx;
-    return GestureDetector(
-      onTap: () => setState(() => _vehicleIdx = idx),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        margin: const EdgeInsets.only(bottom: 14),
-        decoration: BoxDecoration(
-          color: selected ? v.accentColor.withValues(alpha: 0.06) : Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-              color: selected ? v.accentColor : JT.border,
-              width: selected ? 2 : 1),
-          boxShadow: selected ? [
-            BoxShadow(color: v.accentColor.withValues(alpha: 0.15),
-                blurRadius: 16, offset: const Offset(0, 4))
-          ] : [
-            BoxShadow(color: Colors.black.withValues(alpha: 0.04),
-                blurRadius: 8, offset: const Offset(0, 2))
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(children: [
-            // Vehicle icon
-            Container(
-              width: 64, height: 64,
-              decoration: BoxDecoration(
-                color: v.accentColor.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(14)),
-              child: Icon(_iconForKey(v.key), color: v.accentColor, size: 32),
-            ),
-            const SizedBox(width: 14),
-            // Info
-            Expanded(child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                Text(v.name, style: GoogleFonts.poppins(
-                    fontSize: 15, fontWeight: FontWeight.w400,
-                    color: selected ? v.accentColor : JT.textPrimary)),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: v.accentColor.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(8)),
-                  child: Text(v.capacity, style: GoogleFonts.poppins(
-                      fontSize: 10, fontWeight: FontWeight.w500,
-                      color: v.accentColor)),
-                ),
-              ]),
-              const SizedBox(height: 3),
-              Text(v.subtitle, style: GoogleFonts.poppins(
-                  fontSize: 12, color: JT.textSecondary)),
-              const SizedBox(height: 4),
-              Text(v.suitable, style: GoogleFonts.poppins(
-                  fontSize: 11, color: JT.iconInactive)),
-            ])),
-            // Radio
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 22, height: 22,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: selected ? v.accentColor : Colors.transparent,
-                border: Border.all(
-                    color: selected ? v.accentColor : JT.border, width: 2)),
-              child: selected
-                  ? const Icon(Icons.check, color: Colors.white, size: 13)
-                  : null,
-            ),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // STEP 1 — Pickup & Drop locations
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  Widget _buildStep1Location() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Pickup & Delivery', style: GoogleFonts.poppins(
-            fontSize: 20, fontWeight: FontWeight.w400, color: JT.textPrimary)),
-        const SizedBox(height: 4),
-        Text('Confirm pickup and enter delivery address',
-            style: GoogleFonts.poppins(fontSize: 13, color: JT.textSecondary)),
-        const SizedBox(height: 20),
-
-        // Pickup (read-only)
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: JT.primary.withValues(alpha: 0.05),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: JT.primary.withValues(alpha: 0.3))),
-          child: Row(children: [
-            Container(
-              width: 36, height: 36,
-              decoration: BoxDecoration(
-                  color: JT.primary, shape: BoxShape.circle),
-              child: const Icon(Icons.my_location, color: Colors.white, size: 18)),
-            const SizedBox(width: 12),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('PICKUP LOCATION', style: GoogleFonts.poppins(
-                  fontSize: 9, color: JT.primary,
-                  fontWeight: FontWeight.w400, letterSpacing: 1.2)),
-              const SizedBox(height: 2),
-              Text(widget.pickupAddress, style: GoogleFonts.poppins(
-                  fontSize: 13, color: JT.textPrimary,
-                  fontWeight: FontWeight.w400),
-                  maxLines: 2, overflow: TextOverflow.ellipsis),
-            ])),
-          ]),
-        ),
-
-        // Connector
-        Padding(
-          padding: const EdgeInsets.only(left: 34),
-          child: Column(children: List.generate(4, (_) => Container(
-              width: 2, height: 6, margin: const EdgeInsets.symmetric(vertical: 2),
-              color: JT.border))),
-        ),
-
-        // Drop input
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-                color: _destLat != 0 ? JT.success : JT.border),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04),
-                blurRadius: 8, offset: const Offset(0, 2))],
-          ),
-          child: Column(children: [
-            Row(children: [
-              const SizedBox(width: 16),
-              Container(
-                width: 36, height: 36,
-                decoration: BoxDecoration(
-                    color: _destLat != 0 ? JT.success : JT.border,
-                    shape: BoxShape.circle),
-                child: Icon(_destLat != 0 ? Icons.check : Icons.location_on_rounded,
-                    color: Colors.white, size: 18)),
-              const SizedBox(width: 12),
-              Expanded(child: TextField(
-                controller: _dropAddressCtrl,
-                onChanged: _onDropSearch,
-                style: GoogleFonts.poppins(fontSize: 13, color: JT.textPrimary,
-                    fontWeight: FontWeight.w400),
-                decoration: InputDecoration(
-                  hintText: 'Enter delivery address',
-                  hintStyle: GoogleFonts.poppins(
-                      color: JT.iconInactive, fontSize: 13),
-                  border: InputBorder.none,
-                  labelText: 'DELIVERY LOCATION',
-                  labelStyle: GoogleFonts.poppins(
-                      fontSize: 9, color: _destLat != 0 ? JT.success : JT.textSecondary,
-                      fontWeight: FontWeight.w400, letterSpacing: 1.2),
-                  floatingLabelBehavior: FloatingLabelBehavior.always,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-              )),
-              if (_searchingDrop)
-                const Padding(
-                  padding: EdgeInsets.only(right: 12),
-                  child: SizedBox(width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2)),
-                )
-              else if (_dropAddressCtrl.text.isNotEmpty)
-                IconButton(
-                  icon: Icon(Icons.close, color: JT.iconInactive, size: 18),
-                  onPressed: () => setState(() {
-                    _dropAddressCtrl.clear();
-                    _destLat = 0; _destLng = 0;
-                    _suggestions = [];
-                  }),
-                ),
-            ]),
-            // Suggestions
-            if (_suggestions.isNotEmpty) ...[
-              Divider(color: JT.border, height: 1),
-              ..._suggestions.take(5).map((s) => InkWell(
-                onTap: () => _selectSuggestion(s),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Row(children: [
-                    Icon(Icons.location_on_outlined, color: JT.textSecondary, size: 18),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(s['description'] ?? '',
-                        style: GoogleFonts.poppins(fontSize: 13, color: JT.textPrimary),
-                        maxLines: 2, overflow: TextOverflow.ellipsis)),
-                  ]),
-                ),
-              )),
-            ],
-          ]),
-        ),
-
-        const SizedBox(height: 20),
-
-        // Vehicle reminder
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: _vehicle.accentColor.withValues(alpha: 0.06),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: _vehicle.accentColor.withValues(alpha: 0.3))),
-          child: Row(children: [
-            Icon(_iconForKey(_vehicle.key), color: _vehicle.accentColor, size: 26),
-            const SizedBox(width: 10),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(_vehicle.name, style: GoogleFonts.poppins(
-                  fontSize: 13, fontWeight: FontWeight.w500,
-                  color: _vehicle.accentColor)),
-              Text(_vehicle.capacity, style: GoogleFonts.poppins(
-                  fontSize: 11, color: JT.textSecondary)),
-            ]),
-          ]),
-        ),
-      ]),
-    );
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // STEP 2 — Package details
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  Widget _buildStep2Package() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Package Details', style: GoogleFonts.poppins(
-            fontSize: 20, fontWeight: FontWeight.w400, color: JT.textPrimary)),
-        const SizedBox(height: 4),
-        Text('Tell us what you\'re sending',
-            style: GoogleFonts.poppins(fontSize: 13, color: JT.textSecondary)),
-        const SizedBox(height: 20),
-
-        // Item type grid
-        Text('ITEM TYPE', style: GoogleFonts.poppins(
-            fontSize: 10, fontWeight: FontWeight.w400,
-            color: JT.iconInactive, letterSpacing: 1.5)),
-        const SizedBox(height: 10),
-        GridView.count(
-          crossAxisCount: 4, shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: 1.0,
-          children: _kItemTypes.map((t) {
-            final sel = _itemType == t['label'];
-            final icon = _itemTypeIcon(t['icon'] as String);
-            return GestureDetector(
-              onTap: () => setState(() => _itemType = t['label'] as String),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                decoration: BoxDecoration(
-                  color: sel ? JT.primary.withValues(alpha: 0.1) : JT.bgSoft,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: sel ? JT.primary : JT.border,
-                      width: sel ? 2 : 1)),
-                child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  Icon(icon, color: sel ? JT.primary : JT.textSecondary, size: 24),
-                  const SizedBox(height: 4),
-                  Text(t['label'] as String, style: GoogleFonts.poppins(
-                      fontSize: 10, fontWeight: FontWeight.w400,
-                      color: sel ? JT.primary : JT.textSecondary),
-                      textAlign: TextAlign.center),
-                ]),
-              ),
-            );
-          }).toList(),
-        ),
-
-        const SizedBox(height: 20),
-
-        // Weight
-        Text('WEIGHT RANGE', style: GoogleFonts.poppins(
-            fontSize: 10, fontWeight: FontWeight.w400,
-            color: JT.iconInactive, letterSpacing: 1.5)),
-        const SizedBox(height: 10),
-        ...List.generate(_kWeightOptions.length, (i) {
-          final w = _kWeightOptions[i];
-          final kg = (w['value'] as num).toDouble();
-          final overLimit = kg > _vehicle.maxKg;
-          final sel = _weightIdx == i;
-          return GestureDetector(
-            onTap: overLimit ? null : () => setState(() => _weightIdx = i),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: overLimit ? JT.bgSoft.withValues(alpha: 0.5)
-                    : sel ? JT.primary.withValues(alpha: 0.08) : Colors.white,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                    color: overLimit ? JT.border.withValues(alpha: 0.5)
-                        : sel ? JT.primary : JT.border,
-                    width: sel ? 2 : 1)),
-              child: Row(children: [
-                Icon(Icons.scale_outlined,
-                    color: overLimit ? JT.iconInactive
-                        : sel ? JT.primary : JT.textSecondary,
-                    size: 20),
-                const SizedBox(width: 12),
-                Expanded(child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(w['label'] as String, style: GoogleFonts.poppins(
-                      fontSize: 13, fontWeight: FontWeight.w500,
-                      color: overLimit ? JT.iconInactive
-                          : sel ? JT.primary : JT.textPrimary)),
-                  Text(w['desc'] as String, style: GoogleFonts.poppins(
-                      fontSize: 11, color: JT.iconInactive)),
-                ])),
-                if (overLimit)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: JT.error.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8)),
-                    child: Text('Exceeds limit', style: GoogleFonts.poppins(
-                        fontSize: 10, color: JT.error, fontWeight: FontWeight.w400)),
-                  )
-                else if (sel)
-                  Container(
-                    width: 20, height: 20,
-                    decoration: BoxDecoration(
-                        color: JT.primary, shape: BoxShape.circle),
-                    child: const Icon(Icons.check, color: Colors.white, size: 12)),
-              ]),
-            ),
-          );
-        }),
-
-        const SizedBox(height: 20),
-
-        // Item description
-        Text('ITEM DESCRIPTION (optional)', style: GoogleFonts.poppins(
-            fontSize: 10, fontWeight: FontWeight.w400,
-            color: JT.iconInactive, letterSpacing: 1.5)),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _descCtrl,
-          maxLines: 2,
-          style: GoogleFonts.poppins(fontSize: 13, color: JT.textPrimary),
-          decoration: InputDecoration(
-            hintText: 'e.g. Samsung TV 55 inch, packed in box',
-            hintStyle: GoogleFonts.poppins(color: JT.iconInactive, fontSize: 12),
-            filled: true, fillColor: JT.bgSoft,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: JT.border)),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: JT.border)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: JT.primary, width: 1.5)),
-            contentPadding: const EdgeInsets.all(14),
-          ),
-        ),
-
-        const SizedBox(height: 20),
-
-        // Special instructions
-        Text('SPECIAL INSTRUCTIONS (optional)', style: GoogleFonts.poppins(
-            fontSize: 10, fontWeight: FontWeight.w400,
-            color: JT.iconInactive, letterSpacing: 1.5)),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _instructionsCtrl,
-          maxLines: 2,
-          style: GoogleFonts.poppins(fontSize: 13, color: JT.textPrimary),
-          decoration: InputDecoration(
-            hintText: 'Handle with care · Keep upright · Fragile',
-            hintStyle: GoogleFonts.poppins(color: JT.iconInactive, fontSize: 12),
-            filled: true, fillColor: JT.bgSoft,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: JT.border)),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: JT.border)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: JT.primary, width: 1.5)),
-            contentPadding: const EdgeInsets.all(14),
-          ),
-        ),
-
-        const SizedBox(height: 20),
-
-        // Safety confirmation
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: _safetyAgreed
-                ? JT.success.withValues(alpha: 0.06)
-                : JT.error.withValues(alpha: 0.04),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-                color: _safetyAgreed ? JT.success : JT.error.withValues(alpha: 0.3))),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              const Text('🚫', style: TextStyle(fontSize: 16)),
-              const SizedBox(width: 8),
-              Text('Prohibited Items', style: GoogleFonts.poppins(
-                  fontSize: 13, fontWeight: FontWeight.w500, color: JT.error)),
-            ]),
-            const SizedBox(height: 8),
-            Wrap(spacing: 8, runSpacing: 6, children: _kProhibited.map((p) =>
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: JT.error.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(8)),
-                child: Text(p, style: GoogleFonts.poppins(
-                    fontSize: 11, color: JT.error)),
-              )
-            ).toList()),
-            const SizedBox(height: 12),
-            GestureDetector(
-              onTap: () => setState(() => _safetyAgreed = !_safetyAgreed),
-              child: Row(children: [
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  width: 22, height: 22,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(6),
-                    color: _safetyAgreed ? JT.success : Colors.transparent,
-                    border: Border.all(
-                        color: _safetyAgreed ? JT.success : JT.border, width: 2)),
-                  child: _safetyAgreed
-                      ? const Icon(Icons.check, color: Colors.white, size: 14)
-                      : null,
-                ),
-                const SizedBox(width: 10),
-                Expanded(child: Text(
-                  'I confirm my parcel does not contain any prohibited items',
-                  style: GoogleFonts.poppins(fontSize: 12,
-                      color: JT.textSecondary, fontWeight: FontWeight.w500))),
-              ]),
-            ),
-          ]),
-        ),
-        const SizedBox(height: 20),
-      ]),
-    );
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // STEP 3 — Confirm & pay
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  Widget _buildStep3Confirm() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Confirm Booking', style: GoogleFonts.poppins(
-            fontSize: 20, fontWeight: FontWeight.w400, color: JT.textPrimary)),
-        const SizedBox(height: 4),
-        Text('Enter receiver details and review your order',
-            style: GoogleFonts.poppins(fontSize: 13, color: JT.textSecondary)),
-        const SizedBox(height: 20),
-
-        // Receiver details
-        Text('RECEIVER DETAILS', style: GoogleFonts.poppins(
-            fontSize: 10, fontWeight: FontWeight.w400,
-            color: JT.iconInactive, letterSpacing: 1.5)),
-        const SizedBox(height: 10),
-        _inputField(_receiverNameCtrl, 'Receiver Name',
-            Icons.person_outline_rounded, TextInputType.text),
-        const SizedBox(height: 10),
-        _inputField(_receiverPhoneCtrl, 'Receiver Phone (10 digits)',
-            Icons.phone_outlined, TextInputType.phone,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly,
-              LengthLimitingTextInputFormatter(10)]),
-
-        const SizedBox(height: 24),
-
-        // Order summary
-        Text('ORDER SUMMARY', style: GoogleFonts.poppins(
-            fontSize: 10, fontWeight: FontWeight.w400,
-            color: JT.iconInactive, letterSpacing: 1.5)),
-        const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white, borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: JT.border),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04),
-                blurRadius: 8)]),
-          child: Column(children: [
-            // Vehicle row
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(children: [
-                Text(_vehicle.icon, style: const TextStyle(fontSize: 28)),
-                const SizedBox(width: 12),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(_vehicle.name, style: GoogleFonts.poppins(
-                      fontSize: 15, fontWeight: FontWeight.w400, color: JT.textPrimary)),
-                  Text(_vehicle.capacity, style: GoogleFonts.poppins(
-                      fontSize: 12, color: JT.textSecondary)),
-                ])),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _vehicle.accentColor.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(8)),
-                  child: Text(_vehicle.subtitle, style: GoogleFonts.poppins(
-                      fontSize: 10, color: _vehicle.accentColor,
-                      fontWeight: FontWeight.w500)),
-                ),
-              ]),
-            ),
-            Divider(color: JT.border, height: 1),
-            // Route
-            _summaryRow(Icons.trip_origin, 'Pickup', widget.pickupAddress,
-                color: JT.primary),
-            _summaryRow(Icons.location_on_outlined, 'Delivery',
-                _dropAddressCtrl.text, color: JT.error),
-            Divider(color: JT.border, height: 1),
-            _summaryRow(Icons.inventory_2_outlined, 'Item Type',
-                _itemType ?? '-'),
-            _summaryRow(Icons.scale_outlined, 'Weight',
-                _kWeightOptions[_weightIdx]['label'] as String),
-            if (_instructionsCtrl.text.trim().isNotEmpty)
-              _summaryRow(Icons.info_outline_rounded, 'Instructions',
-                  _instructionsCtrl.text.trim()),
-          ]),
-        ),
-
-        const SizedBox(height: 20),
-
-        // Fare breakdown
-        _estimating
-            ? Center(child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 12),
-                  Text('Calculating fare...', style: GoogleFonts.poppins(
-                      color: JT.textSecondary, fontSize: 13)),
-                ])))
-            : _estimate != null
-                ? _buildFareCard()
-                : const SizedBox(),
-
-        const SizedBox(height: 20),
-
-        // Payment method
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: JT.bgSoft, borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: JT.border)),
-          child: Row(children: [
-            Container(
-              width: 40, height: 40,
-              decoration: BoxDecoration(
-                  color: JT.success.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10)),
-              child: Icon(Icons.payments_outlined, color: JT.success, size: 22)),
-            const SizedBox(width: 12),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Cash on Delivery', style: GoogleFonts.poppins(
-                  fontSize: 14, fontWeight: FontWeight.w500, color: JT.textPrimary)),
-              Text('Pay driver after delivery', style: GoogleFonts.poppins(
-                  fontSize: 11, color: JT.textSecondary)),
-            ])),
-            Icon(Icons.check_circle, color: JT.success),
-          ]),
-        ),
-
-        const SizedBox(height: 24),
-      ]),
-    );
-  }
-
-  Widget _inputField(TextEditingController ctrl, String hint,
-      IconData icon, TextInputType type,
-      {List<TextInputFormatter>? inputFormatters}) {
-    return TextField(
-      controller: ctrl,
-      keyboardType: type,
-      inputFormatters: inputFormatters,
-      onChanged: (_) => setState(() {}),
-      style: GoogleFonts.poppins(fontSize: 14, color: JT.textPrimary,
-          fontWeight: FontWeight.w400),
-      decoration: InputDecoration(
-        hintText: hint,
-        hintStyle: GoogleFonts.poppins(color: JT.iconInactive, fontSize: 13),
-        prefixIcon: Icon(icon, color: JT.textSecondary, size: 20),
-        filled: true, fillColor: JT.bgSoft,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: JT.border)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: JT.border)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: JT.primary, width: 1.5)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      ),
-    );
-  }
-
-  Widget _summaryRow(IconData icon, String label, String value, {Color? color}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      child: Row(children: [
-        Icon(icon, size: 18, color: color ?? JT.textSecondary),
-        const SizedBox(width: 10),
-        Text(label, style: GoogleFonts.poppins(
-            fontSize: 12, color: JT.textSecondary)),
-        const SizedBox(width: 8),
-        Expanded(child: Text(value, style: GoogleFonts.poppins(
-            fontSize: 12, fontWeight: FontWeight.w500,
-            color: color ?? JT.textPrimary),
-            textAlign: TextAlign.right,
-            maxLines: 2, overflow: TextOverflow.ellipsis)),
-      ]),
-    );
-  }
-
-  Widget _buildFareCard() {
-    final e = _estimate!;
-    // Use grandTotal (includes GST) if present; fall back to totalFare for backward compat
-    final total  = (e['grandTotal'] ?? e['totalFare'] ?? 0) as num;
-    final base   = (e['baseFare'] ?? 0) as num;
-    final dist   = (e['distanceFare'] ?? 0) as num;
-    final wt     = (e['weightFare'] ?? 0) as num;
-    final load   = (e['loadingCharge'] ?? e['loadCharge'] ?? 0) as num;
-    final gst    = (e['gstAmount'] ?? 0) as num;
-    final minFare = (e['minimumFare'] ?? 0) as num;
-
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [_vehicle.accentColor.withValues(alpha: 0.08),
-              _vehicle.accentColor.withValues(alpha: 0.02)],
-          begin: Alignment.topLeft, end: Alignment.bottomRight),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _vehicle.accentColor.withValues(alpha: 0.3))),
-      child: Column(children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-          child: Row(children: [
-            Icon(Icons.receipt_long_outlined, color: _vehicle.accentColor, size: 18),
-            const SizedBox(width: 8),
-            Text('FARE BREAKDOWN', style: GoogleFonts.poppins(
-                fontSize: 10, fontWeight: FontWeight.w400,
-                color: _vehicle.accentColor, letterSpacing: 1.2)),
-          ]),
-        ),
-        _fareRow('Base Fare', '₹$base'),
-        _fareRow('Distance Charge', '₹$dist'),
-        _fareRow('Weight Charge', '₹$wt'),
-        if (load > 0) _fareRow('Loading Charge', '₹$load'),
-        if (minFare > 0 && total < minFare) _fareRow('Minimum Fare Applied', '₹$minFare', highlight: true),
-        if (gst > 0) _fareRow('GST (5%)', '₹$gst'),
-        Divider(color: _vehicle.accentColor.withValues(alpha: 0.2), height: 1),
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(children: [
-            Text('TOTAL (incl. GST)', style: GoogleFonts.poppins(
-                fontSize: 14, fontWeight: FontWeight.w500, color: JT.textPrimary)),
-            const Spacer(),
-            Text('₹$total', style: GoogleFonts.poppins(
-                fontSize: 22, fontWeight: FontWeight.w500,
-                color: _vehicle.accentColor)),
-          ]),
-        ),
-      ]),
-    );
-  }
-
-  Widget _fareRow(String label, String val, {bool highlight = false}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Row(children: [
-        Text(label, style: GoogleFonts.poppins(
-            fontSize: 13,
-            color: highlight ? Colors.orange.shade700 : JT.textSecondary,
-            fontWeight: highlight ? FontWeight.w400 : FontWeight.normal)),
-        const Spacer(),
-        Text(val, style: GoogleFonts.poppins(
-            fontSize: 13, fontWeight: FontWeight.w500,
-            color: highlight ? Colors.orange.shade700 : JT.textPrimary)),
-      ]),
-    );
-  }
-
-  // ── Bottom bar ────────────────────────────────────────────────────────────────
-
-  Widget _buildBottomBar() {
-    String btnLabel;
-    switch (_step) {
-      case 0: btnLabel = 'Select ${_vehicle.name}'; break;
-      case 1: btnLabel = 'Add Package Details'; break;
-      case 2: btnLabel = 'Review & Confirm'; break;
-      case 3: btnLabel = 'Book Delivery'; break;
-      default: btnLabel = 'Next';
-    }
-
-    final isLastStep = _step == 3;
-    final enabled = _canNext && !_booking;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08),
-            blurRadius: 20, offset: const Offset(0, -4))]),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-          child: Row(children: [
-            if (_step > 0)
-              GestureDetector(
-                onTap: _back,
-                child: Container(
-                  width: 48, height: 52,
-                  margin: const EdgeInsets.only(right: 12),
-                  decoration: BoxDecoration(
-                    color: JT.bgSoft, borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: JT.border)),
-                  child: Icon(Icons.arrow_back_rounded,
-                      color: JT.textSecondary, size: 22),
-                ),
-              ),
-            Expanded(
-              child: GestureDetector(
-                onTap: enabled
-                    ? (isLastStep ? _book : _next)
-                    : null,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  height: 52,
-                  decoration: BoxDecoration(
-                    gradient: enabled ? JT.grad : null,
-                    color: enabled ? null : JT.bgSoft,
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: enabled ? JT.btnShadow : [],
-                  ),
-                  child: Center(
-                    child: _booking
-                        ? const SizedBox(width: 22, height: 22,
-                            child: CircularProgressIndicator(
-                                color: Colors.white, strokeWidth: 2))
-                        : Row(mainAxisSize: MainAxisSize.min, children: [
-                            Text(btnLabel, style: GoogleFonts.poppins(
-                                fontSize: 15, fontWeight: FontWeight.w400,
-                                color: enabled ? Colors.white : JT.iconInactive)),
-                            if (enabled) ...[
-                              const SizedBox(width: 8),
-                              Icon(isLastStep
-                                  ? Icons.local_shipping_rounded
-                                  : Icons.arrow_forward_rounded,
-                                  color: Colors.white, size: 18),
-                            ],
-                          ]),
-                  ),
-                ),
-              ),
-            ),
-          ]),
-        ),
-      ),
-    );
   }
 }

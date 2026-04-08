@@ -585,9 +585,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _connectSocket() {
     _socket.connect(ApiConfig.socketUrl).then((_) {
-      // IMPORTANT: Delay subscription by 2.5 seconds to avoid stale socket
-      // events from previous sessions causing immediate navigation away from home
-      Future.delayed(const Duration(milliseconds: 2500), () {
+      // IMPORTANT: Reduced delay to 500ms to ensure faster responsiveness
+      // while still avoiding immediate stale navigation on initial connection.
+      Future.delayed(const Duration(milliseconds: 500), () {
         if (!mounted) return;
         _driverAssignedSub = _socket.onDriverAssigned.listen((data) {
           if (!mounted) return;
@@ -598,7 +598,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             final activeTripId = _activeTrip?['id']?.toString() ?? '';
             // Only navigate if we have a confirmed active trip matching this event.
             // Prevents stale socket events from causing blank-screen navigation on login.
-            if (activeTripId.isNotEmpty && activeTripId == tripId) {
+            // Only navigate if this is the active screen (prevents double-navigation
+            // if BookingScreen is already on top or TrackingScreen is already open)
+            final isCurrent = ModalRoute.of(context)?.isCurrent ?? false;
+            if (activeTripId.isNotEmpty && activeTripId == tripId && isCurrent) {
               Navigator.pushReplacement(
                   context,
                   MaterialPageRoute(
@@ -1107,102 +1110,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     const isDark = false;
-    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
-      systemNavigationBarColor: Colors.white,
-      systemNavigationBarIconBrightness: Brightness.dark,
-    ));
+    final screenWidth = MediaQuery.of(context).size.width;
+    final gridRatio = screenWidth < 380 ? 2.1 : (screenWidth > 600 ? 3.0 : 2.3);
+    final textScale = screenWidth < 380 ? 0.9 : 1.0;
 
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: Colors.white, // White base — no colored strip at bottom ever
       drawer: _buildDrawer(isDark),
-      body: Container(
-        color: const Color(0xFFD3C7FE),
-        child: SafeArea(
-                bottom: false,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                // Top Bar
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 0), // Reduced bottom margin
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // Jago Logo (Left) - Opens Profile
-                      GestureDetector(
-                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfileScreen())),
-                        child: JT.logoWhite(height: 72), // Significantly increased for high visibility
-                      ),
-                      
-                      // Actions (Right): Wallet & Notifications
-                      Row(
-                        children: [
-                          // Wallet Button
-                          GestureDetector(
-                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WalletScreen())),
-                            child: Container(
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                boxShadow: [
-                                  BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 4)),
-                                ],
-                              ),
-                              child: const Icon(Icons.account_balance_wallet_outlined, color: Color(0xFF64748B), size: 24),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          // Notification Bell
-                          GestureDetector(
-                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const NotificationsScreen())),
-                            child: Container(
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                boxShadow: [
-                                  BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 8, offset: const Offset(0, 4)),
-                                ],
-                              ),
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  const Icon(Icons.notifications_none_rounded, color: Color(0xFF64748B), size: 24),
-                                  if (_unreadNotifCount >= 0) 
-                                    Positioned(
-                                      top: 12,
-                                      right: 12,
-                                      child: Container(
-                                        width: 8,
-                                        height: 8,
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFFEF4444),
-                                          shape: BoxShape.circle,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                
-                Expanded(
-                  child: SingleChildScrollView(
-                    physics: const BouncingScrollPhysics(),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
+      body: SingleChildScrollView(
+              physics: const BouncingScrollPhysics(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const SizedBox(height: 24),
                         // Greeting
                         Padding(
                   padding: const EdgeInsets.fromLTRB(20, 4, 20, 8), // Reduced top margin from 12 to 4
@@ -1353,9 +1274,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             child: Stack(
                               children: [
                                 // Text at the top
-                                const Positioned(
+                                Positioned(
                                   top: 14, left: 16,
-                                  child: Text("Book a Ride", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w900)),
+                                  child: SizedBox(
+                                    width: (screenWidth / 2) - 60,
+                                    child: FittedBox(
+                                      alignment: Alignment.centerLeft,
+                                      fit: BoxFit.scaleDown,
+                                      child: Text("Book a Ride", style: TextStyle(color: Colors.white, fontSize: 16 * textScale, fontWeight: FontWeight.w900)),
+                                    ),
+                                  ),
+                                ),
+                                // New brand image on the left
+                                Positioned(
+                                  bottom: -8, left: -8,
+                                  child: Image.network(
+                                    'https://res.cloudinary.com/kits/image/upload/q_auto/f_auto/v1775370325/04bcf87d-433e-4508-b475-78eaee34ff98_qxbn2c.png',
+                                    height: 85,
+                                    fit: BoxFit.contain,
+                                  ),
                                 ),
                                 // Large 3D Car Image centered at the bottom
                                 Positioned(
@@ -1388,9 +1325,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             child: Stack(
                               children: [
                                 // Text at the top
-                                const Positioned(
+                                Positioned(
                                   top: 14, left: 16,
-                                  child: Text("Send Parcel", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w900)),
+                                  child: SizedBox(
+                                    width: (screenWidth / 2) - 60,
+                                    child: FittedBox(
+                                      alignment: Alignment.centerLeft,
+                                      fit: BoxFit.scaleDown,
+                                      child: Text("Send Parcel", style: TextStyle(color: Colors.white, fontSize: 16 * textScale, fontWeight: FontWeight.w900)),
+                                    ),
+                                  ),
+                                ),
+                                // Delivery image on the left side
+                                Positioned(
+                                  bottom: -8, left: -8,
+                                  child: Image.network(
+                                    'https://res.cloudinary.com/kits/image/upload/q_auto/f_auto/v1775367404/be5b86c2-7a8a-4dbd-ad33-e8da2b627d5e_vurdrg.png',
+                                    height: 85,
+                                    fit: BoxFit.contain,
+                                  ),
                                 ),
                                 // Large 3D Gift/Box Image centered at the bottom
                                 Positioned(
@@ -1426,7 +1379,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   physics: const NeverScrollableScrollPhysics(),
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
                   crossAxisCount: 2,
-                  childAspectRatio: 2.3, // Slightly wider to avoid name cutting
+                  childAspectRatio: gridRatio, // Responsive ratio based on screen width
                   crossAxisSpacing: 12,
                   mainAxisSpacing: 12,
                   children: [
@@ -1445,13 +1398,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             clipBehavior: Clip.none, // Allow 3D image overflow
                             children: [
                               // Label on the left
-                              const Positioned(
+                              Positioned(
                                 left: 16,
                                 top: 0,
                                 bottom: 0,
-                                child: Center(
-                                  child: Text("Bike", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18, fontWeight: FontWeight.bold)),
-                                ),
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: Text("Bike", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18 * textScale, fontWeight: FontWeight.bold)),
+                                  ),
                               ),
                               // Large 3D Bike Image on the right
                               Positioned(
@@ -1483,13 +1437,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             clipBehavior: Clip.none, 
                             children: [
                               // Label on the left
-                              const Positioned(
+                              Positioned(
                                 left: 16,
                                 top: 0,
                                 bottom: 0,
-                                child: Center(
-                                  child: Text("Auto", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18, fontWeight: FontWeight.bold)),
-                                ),
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: Text("Auto", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18 * textScale, fontWeight: FontWeight.bold)),
+                                  ),
                               ),
                               // Large 3D Auto (Rickshaw) Image on the right
                               Positioned(
@@ -1521,13 +1476,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             clipBehavior: Clip.none, 
                             children: [
                               // Label on the left
-                              const Positioned(
+                              Positioned(
                                 left: 16,
                                 top: 0,
                                 bottom: 0,
-                                child: Center(
-                                  child: Text("Cab", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18, fontWeight: FontWeight.bold)),
-                                ),
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: Text("Cab", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18 * textScale, fontWeight: FontWeight.bold)),
+                                  ),
                               ),
                               // Large 3D Cab Image on the right
                               Positioned(
@@ -1559,13 +1515,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             clipBehavior: Clip.none, 
                             children: [
                               // Label on the left
-                              const Positioned(
+                              Positioned(
                                 left: 12, // Adjusted padding
                                 top: 0,
                                 bottom: 0,
-                                child: Center(
-                                  child: Text("Premium", style: TextStyle(color: Color(0xFF1E293B), fontSize: 15, fontWeight: FontWeight.bold)),
-                                ),
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: Text("Premium", style: TextStyle(color: Color(0xFF1E293B), fontSize: 15 * textScale, fontWeight: FontWeight.bold)),
+                                  ),
                               ),
                               // Large 3D Premium Image on the right
                               Positioned(
@@ -1597,13 +1554,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             clipBehavior: Clip.none, 
                             children: [
                               // Label on the left
-                              const Positioned(
+                              Positioned(
                                 left: 16,
                                 top: 0,
                                 bottom: 0,
-                                child: Center(
-                                  child: Text("Parcel", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18, fontWeight: FontWeight.bold)),
-                                ),
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: Text("Parcel", style: TextStyle(color: Color(0xFF1E293B), fontSize: 18 * textScale, fontWeight: FontWeight.bold)),
+                                  ),
                               ),
                               // Large 3D Parcel Image on the right
                               Positioned(
@@ -1635,12 +1593,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               clipBehavior: Clip.none, 
                               children: [
                                 // Label on the left
-                                const Positioned(
-                                  left: 12, // Adjusted padding
-                                  top: 0,
-                                  bottom: 0,
+                                Positioned(
+                                  left: 12, top: 0, bottom: 0,
                                   child: Center(
-                                    child: Text("Delivery", style: TextStyle(color: Color(0xFF1E293B), fontSize: 15, fontWeight: FontWeight.bold)),
+                                    child: SizedBox(
+                                      width: (screenWidth / 2) - 50,
+                                      child: FittedBox(
+                                        alignment: Alignment.centerLeft,
+                                        fit: BoxFit.scaleDown,
+                                        child: Text("Delivery", style: TextStyle(color: Color(0xFF1E293B), fontSize: 15 * textScale, fontWeight: FontWeight.bold)),
+                                      ),
+                                    ),
                                   ),
                                 ),
                                 // Large 3D Delivery Image on the right
@@ -1649,8 +1612,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   top: -12,
                                   bottom: -12,
                                   child: Image.network(
-                                    'https://res.cloudinary.com/kits/image/upload/q_auto/f_auto/v1775128124/ChatGPT_Image_Apr_2_2026_04_32_19_PM_xb7wtx.png',
-                                    width: 100, 
+                                    'https://res.cloudinary.com/kits/image/upload/q_auto/f_auto/v1775367404/be5b86c2-7a8a-4dbd-ad33-e8da2b627d5e_vurdrg.png',
+                                    width: 115, 
                                     fit: BoxFit.contain,
                                   ),
                                 ),
@@ -1676,91 +1639,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ],
               ),
             ),
-          ),
-                ],
-              ),
-            ),
-      ),
-      // Bottom Navigation — clean white, no colored strip below
-      bottomNavigationBar: Container(
-            color: Colors.white,
-            child: SafeArea(
-              top: false,
-              minimum: const EdgeInsets.only(bottom: 4),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 6),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    // Home (active)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF4B4AD2), Color(0xFF6366F1)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFF4B4AD2).withOpacity(0.25),
-                            blurRadius: 8,
-                            offset: const Offset(0, 3),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.home_rounded, color: Colors.white, size: 18),
-                          SizedBox(width: 6),
-                          Text("Home", style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
-                        ],
-                      ),
-                    ),
-                    // Trips
-                    GestureDetector(
-                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const TripsHistoryScreen())),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.receipt_long_outlined, color: Color(0xFF94A3B8), size: 22),
-                          SizedBox(height: 4),
-                          Text("Trips", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 10, fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    ),
-                    // Wallet
-                    GestureDetector(
-                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WalletScreen())),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.account_balance_wallet_outlined, color: Color(0xFF94A3B8), size: 22),
-                          SizedBox(height: 4),
-                          Text("Wallet", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 10, fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    ),
-                    // Profile
-                    // Profile
-                    GestureDetector(
-                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfileScreen())),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.person_outline_rounded, color: Color(0xFF94A3B8), size: 22),
-                          SizedBox(height: 4),
-                          Text("Profile", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 10, fontWeight: FontWeight.w500)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
     );
   }
 
@@ -1848,8 +1726,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 )));
               },
             ),
-          // Bottom nav
-          _buildBottomNav(isDark, JT.bg, JT.textPrimary),
+          // Bottom nav removed
         ],
       ),
     );
@@ -3183,101 +3060,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // ── BOTTOM NAV ───────────────────────────────────────────────────────────
-  Widget _buildBottomNav(bool isDark, Color cardBg, Color textColor) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: const Border(top: BorderSide(color: JT.border, width: 1)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.06),
-            blurRadius: 16,
-            offset: const Offset(0, -4),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 64,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              _navItem(Icons.home_rounded, Icons.home_outlined, 'Home', 0,
-                  JT.iconInactive, isDark),
-              _navItem(Icons.receipt_long_rounded, Icons.receipt_long_outlined,
-                  'Trips', 1, JT.iconInactive, isDark),
-              _navItem(
-                  Icons.account_balance_wallet_rounded,
-                  Icons.account_balance_wallet_outlined,
-                  'Wallet',
-                  2,
-                  JT.iconInactive,
-                  isDark),
-              _navItem(Icons.person_rounded, Icons.person_outline_rounded,
-                  'Profile', 3, JT.iconInactive, isDark),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _navItem(IconData activeIcon, IconData inactiveIcon, String label,
-      int index, Color iconColor, bool isDark) {
-    final active = _navIndex == index;
-    return GestureDetector(
-      onTap: () {
-        setState(() => _navIndex = index);
-        if (index == 1)
-          Navigator.pushReplacement(context,
-              PageRouteBuilder(
-                pageBuilder: (_, __, ___) => const TripsHistoryScreen(),
-                transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-                transitionDuration: const Duration(milliseconds: 200),
-              ));
-        if (index == 2)
-          Navigator.pushReplacement(context,
-              PageRouteBuilder(
-                pageBuilder: (_, __, ___) => const WalletScreen(),
-                transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-                transitionDuration: const Duration(milliseconds: 200),
-              ));
-        if (index == 3)
-          Navigator.pushReplacement(context,
-              PageRouteBuilder(
-                pageBuilder: (_, __, ___) => const ProfileScreen(),
-                transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-                transitionDuration: const Duration(milliseconds: 200),
-              ));
-      },
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          width: 40,
-          height: 32,
-          decoration: BoxDecoration(
-            color:
-                active ? JT.primary.withValues(alpha: 0.1) : Colors.transparent,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Icon(active ? activeIcon : inactiveIcon,
-              size: 20, color: active ? JT.primary : JT.iconInactive),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          label,
-          style: GoogleFonts.poppins(
-            fontSize: 10,
-            fontWeight: active ? FontWeight.w500 : FontWeight.w500,
-            color: active ? JT.primary : JT.iconInactive,
-          ),
-        ),
-      ]),
-    );
-  }
+  // Deleted stray code
 
   // ── DRAWER ───────────────────────────────────────────────────────────────
   Widget _buildDrawer(bool isDark) {

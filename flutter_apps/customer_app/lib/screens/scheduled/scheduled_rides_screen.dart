@@ -157,9 +157,16 @@ class _ScheduleSheetState extends State<_ScheduleSheet> {
       double pickupLat = 17.385044;
       double pickupLng = 78.486671;
       try {
-        final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high).timeout(const Duration(seconds: 5));
-        pickupLat = pos.latitude;
-        pickupLng = pos.longitude;
+        var perm = await Geolocator.checkPermission();
+        if (perm == LocationPermission.denied) {
+          perm = await Geolocator.requestPermission();
+        }
+        if (perm != LocationPermission.denied && perm != LocationPermission.deniedForever) {
+          var pos = await Geolocator.getLastKnownPosition();
+          pos ??= await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high).timeout(const Duration(seconds: 5));
+          pickupLat = pos!.latitude;
+          pickupLng = pos!.longitude;
+        }
       } catch (_) {}
       final headers = await AuthService.getHeaders();
       final res = await http.post(Uri.parse(ApiConfig.scheduleRide), headers: headers,

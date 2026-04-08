@@ -168,7 +168,12 @@ export async function searchPlaces(
     if (!r.ok) return searchPopularLocations(query);
     const data = await r.json() as any;
 
-    if (data?.status !== "OK" || !data.predictions?.length) {
+    if (data?.status !== "OK") {
+      console.warn(`[mapping-unified:searchPlaces] API Status: ${data?.status}, Msg: ${data?.error_message || 'none'}`);
+      return searchPopularLocations(query);
+    }
+
+    if (!data.predictions?.length) {
       return searchPopularLocations(query);
     }
 
@@ -182,7 +187,8 @@ export async function searchPlaces(
 
     placesCache.set(cacheKey, results);
     return results;
-  } catch {
+  } catch (e: any) {
+    console.error(`[mapping-unified:searchPlaces] Failed:`, e.message || e);
     return searchPopularLocations(query);
   } finally {
     clearTimeout(timeout);

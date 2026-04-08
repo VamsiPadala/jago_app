@@ -16,6 +16,7 @@ import '../safety/emergency_contacts_screen.dart';
 import '../referral/referral_screen.dart';
 import './support_chat_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -118,11 +119,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Widget _buildProfileSkeleton() {
     Widget box(double w, double h, {double r = 8}) => Container(
-      width: w, height: h,
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(r)),
+      width: w,
+      height: h,
+      decoration: BoxDecoration(
+          color: Colors.white, borderRadius: BorderRadius.circular(r)),
     );
-    return SafeArea(
-      child: Shimmer.fromColors(
+    return Shimmer.fromColors(
         baseColor: const Color(0xFFE5E7EB),
         highlightColor: const Color(0xFFF3F4F6),
         child: SingleChildScrollView(
@@ -150,9 +152,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
             )),
           ]),
         ),
-      ),
-    );
-  }
+      );
+    }
 
   void _showSettingsSheet(Color cardBg, Color textColor, Color subColor) {
     showModalBottomSheet(
@@ -306,278 +307,314 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    
-    final scaffoldBg =
-        JT.bgSoft;
+    final scaffoldBg = Colors.white; // Pure white base
     final cardBg = Colors.white;
-    final textColor = JT.textPrimary;
-    final subColor = JT.textSecondary;
-    final divColor = JT.border;
-    final accentColor = JT.primary;
+    final textColor = const Color(0xFF1E293B);
+    final subColor = const Color(0xFF64748B);
+    final accentColor = const Color(0xFF7C3AED); // Premium Purple
 
     return Scaffold(
       backgroundColor: scaffoldBg,
-      appBar: AppBar(
-        backgroundColor: cardBg,
-        elevation: 0,
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back_ios_new_rounded, color: textColor, size: 20),
-          onPressed: () => Navigator.pop(context)),
-        title: Text('My Profile',
-            style: TextStyle(
-                color: textColor, fontWeight: FontWeight.w500, fontSize: 17)),
-        actions: [
-          if (!_editing)
-            TextButton.icon(
-              onPressed: () => setState(() => _editing = true),
-              icon: Icon(Icons.edit_outlined,
-                  color: accentColor, size: 18),
-              label: Text('Edit',
-                  style: TextStyle(
-                      color: accentColor, fontWeight: FontWeight.w400)),
-            )
-          else ...[
-            TextButton(
-              onPressed: () =>
-                  setState(() {
-                    _editing = false;
-                    _nameCtrl.text = _name;
-                    _emailCtrl.text = _email;
-                  }),
-              child: Text('Cancel', style: TextStyle(color: subColor)),
-            ),
-            TextButton(
-              onPressed: _saving ? null : _saveProfile,
-              child: _saving
-                  ? SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: accentColor))
-                  : Text('Save',
-                      style: TextStyle(
-                          color: accentColor,
-                          fontWeight: FontWeight.w500)),
-            ),
-          ],
-        ],
-      ),
       body: _loading
           ? _buildProfileSkeleton()
           : SingleChildScrollView(
+              physics: const BouncingScrollPhysics(),
               child: Column(children: [
-                Container(
-                  width: double.infinity,
-                  color: cardBg,
-                  padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+                const SizedBox(height: 12),
+                // Header Area with Actions
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('My Profile', 
+                        style: GoogleFonts.poppins(
+                          fontSize: 20, 
+                          fontWeight: FontWeight.w600, 
+                          color: textColor
+                        )
+                      ),
+                      if (!_editing)
+                        GestureDetector(
+                          onTap: () => setState(() => _editing = true),
+                          child: Row(
+                            children: [
+                              Icon(Icons.edit_rounded, color: accentColor, size: 18),
+                              const SizedBox(width: 4),
+                              Text('Edit', 
+                                style: GoogleFonts.poppins(
+                                  color: accentColor, 
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 15
+                                )
+                              ),
+                            ],
+                          ),
+                        )
+                      else
+                        Row(
+                          children: [
+                            TextButton(
+                              onPressed: () => setState(() {
+                                _editing = false;
+                                _nameCtrl.text = _name;
+                                _emailCtrl.text = _email;
+                              }),
+                              child: Text('Cancel', style: GoogleFonts.poppins(color: subColor)),
+                            ),
+                            const SizedBox(width: 8),
+                            GestureDetector(
+                              onTap: _saving ? null : _saveProfile,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: accentColor,
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: _saving
+                                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                    : Text('Save', style: GoogleFonts.poppins(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+                              ),
+                            ),
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
+
+                // Avatar and Basic Info
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
                   child: Column(children: [
                     Stack(
                       alignment: Alignment.bottomRight,
                       children: [
-                        CircleAvatar(
-                          radius: 44,
-                          backgroundColor:
-                              accentColor.withValues(alpha: 0.15),
-                          child: Text(
-                            _name.isNotEmpty
-                                ? _name[0].toUpperCase()
-                                : 'U',
-                            style: TextStyle(
-                                color: accentColor,
-                                fontSize: 36,
-                                fontWeight: FontWeight.w500),
+                        Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.white,
+                            boxShadow: [
+                              BoxShadow(color: accentColor.withValues(alpha: 0.1), blurRadius: 20, offset: const Offset(0, 8)),
+                            ],
+                          ),
+                          child: CircleAvatar(
+                            radius: 54,
+                            backgroundColor: scaffoldBg,
+                            child: Text(
+                              _name.isNotEmpty ? _name[0].toUpperCase() : 'U',
+                              style: GoogleFonts.poppins(
+                                  color: accentColor,
+                                  fontSize: 42,
+                                  fontWeight: FontWeight.w600),
+                            ),
                           ),
                         ),
                         if (_editing)
                           Container(
-                            padding: const EdgeInsets.all(6),
+                            padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
                                 color: accentColor,
                                 shape: BoxShape.circle,
-                                border: Border.all(
-                                    color: cardBg, width: 2)),
-                            child: const Icon(Icons.camera_alt_outlined,
-                                color: Colors.white, size: 14),
+                                border: Border.all(color: Colors.white, width: 3)),
+                            child: const Icon(Icons.camera_alt_rounded,
+                                color: Colors.white, size: 16),
                           ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 20),
                     if (_editing) ...[
-                      _editField('Full Name', _nameCtrl, textColor),
-                      const SizedBox(height: 10),
-                      _editField('Email Address', _emailCtrl, textColor,
-                          keyboard: TextInputType.emailAddress),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Column(children: [
+                          _editField('Full Name', _nameCtrl, textColor),
+                          const SizedBox(height: 12),
+                          _editField('Email Address', _emailCtrl, textColor,
+                              keyboard: TextInputType.emailAddress),
+                        ]),
+                      ),
                     ] else ...[
                       Text(_name,
-                          style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w400,
-                              color: textColor)),
-                      const SizedBox(height: 4),
+                          style: GoogleFonts.poppins(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w600,
+                              color: textColor,
+                              letterSpacing: -0.5)),
+                      const SizedBox(height: 6),
                       Text('+91 $_phone',
-                          style: TextStyle(color: subColor, fontSize: 14)),
-                      if (_email.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(_email,
-                            style:
-                                TextStyle(color: subColor, fontSize: 13)),
-                      ],
-                      const SizedBox(height: 10),
+                          style: GoogleFonts.poppins(color: subColor, fontSize: 15, fontWeight: FontWeight.w400)),
+                      const SizedBox(height: 8),
                       Row(mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                         const Icon(Icons.star_rounded,
                             color: Colors.amber, size: 20),
                         const SizedBox(width: 4),
                         Text(_rating.toStringAsFixed(1),
-                            style: TextStyle(
-                                fontWeight: FontWeight.w500,
+                            style: GoogleFonts.poppins(
+                                fontWeight: FontWeight.w600,
                                 color: textColor,
                                 fontSize: 15)),
                         Text(' rating',
-                            style:
-                                TextStyle(color: subColor, fontSize: 13)),
+                            style: GoogleFonts.poppins(color: subColor, fontSize: 14)),
                       ]),
                     ],
                   ]),
                 ),
-                const SizedBox(height: 12),
+
+                // Stats Section
                 Container(
-                  color: cardBg,
-                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.symmetric(horizontal: 24),
+                  padding: const EdgeInsets.symmetric(vertical: 20),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                    borderRadius: BorderRadius.circular(24),
+                  ),
                   child: Row(children: [
-                    _statCard('Wallet', '₹${_walletBalance.toStringAsFixed(0)}',
-                        Icons.account_balance_wallet_outlined,
-                        accentColor),
-                    _statCard('Loyalty Points', '$_loyaltyPoints pts',
+                    _statItem('Wallet', '₹${_walletBalance.toStringAsFixed(0)}',
+                        Icons.account_balance_wallet_rounded,
+                        const Color(0xFF3B82F6)),
+                    _statItem('Loyalty', '$_loyaltyPoints pts',
                         Icons.stars_rounded, Colors.amber),
-                    _statCard('Trips', '$_completedTrips',
-                        Icons.directions_car_rounded,
-                        Colors.green),
-                    _statCard('Spent', '₹${_totalSpent.toStringAsFixed(0)}',
-                        Icons.receipt_long_outlined, Colors.purple),
+                    _statItem('Trips', '$_completedTrips',
+                         Icons.directions_car_rounded,
+                        const Color(0xFF10B981)),
+                    _statItem('Spent', '₹${_totalSpent.toStringAsFixed(0)}',
+                        Icons.payments_rounded, const Color(0xFF8B5CF6)),
                   ]),
                 ),
-                const SizedBox(height: 12),
-                _section([
-                  _tile(Icons.favorite_border_rounded, 'Saved Places',
-                      accentColor, cardBg, textColor, divColor,
-                      () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => const SavedPlacesScreen()))),
-                  _tile(Icons.tune_rounded, 'Ride Preferences',
-                      accentColor, cardBg, textColor, divColor,
-                      () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => const RidePreferencesScreen()))),
-                  _tile(Icons.card_membership_rounded, 'Monthly Pass',
-                      accentColor, cardBg, textColor, divColor,
-                      () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => const MonthlyPassScreen()))),
-                  _tile(Icons.card_giftcard_rounded, 'Refer & Earn',
-                      Colors.amber.shade700, cardBg, textColor, divColor,
-                      () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => const ReferralScreen()))),
-                ], cardBg),
-                const SizedBox(height: 12),
-                _section([
-                  _tile(Icons.search_rounded, 'Lost & Found', Colors.orange,
-                      cardBg, textColor, divColor,
-                      () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => const LostFoundScreen()))),
-                  _tile(Icons.shield_outlined, 'Emergency Contacts', Colors.red,
-                      cardBg, textColor, divColor,
-                      () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => const EmergencyContactsScreen()))),
-                  _tile(Icons.headset_mic_outlined, 'Help & Support',
-                      Colors.teal, cardBg, textColor, divColor, () {
-                        Navigator.push(context, MaterialPageRoute(builder: (_) => const SupportChatScreen()));
-                      }),
-                  _tile(Icons.phone_in_talk_rounded, 'Call Support',
-                      Colors.green, cardBg, textColor, divColor, () async {
-                        final phone = await _getSupportPhone();
-                        final uri = Uri(scheme: 'tel', path: phone);
-                        if (await canLaunchUrl(uri)) {
-                          await launchUrl(uri);
-                        } else {
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                            content: Text('Support: $phone', style: const TextStyle(fontWeight: FontWeight.w400)),
-                            backgroundColor: Colors.green,
-                            behavior: SnackBarBehavior.floating,
-                          ));
-                        }
-                      }),
-                ], cardBg),
-                const SizedBox(height: 12),
-                _section([
-                  _buildLanguageTile(cardBg, textColor, subColor),
-                  Divider(height: 1, color: divColor, indent: 56),
-                  ListTile(
-                    leading: Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                          color: JT.surfaceAlt,
-                          borderRadius: BorderRadius.circular(8)),
-                      child: const Icon(Icons.settings_outlined,
-                          color: JT.primary, size: 20),
-                    ),
-                    title: Text('Settings',
-                        style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w500,
-                            color: textColor)),
-                    trailing: Icon(Icons.chevron_right,
-                        color: subColor, size: 20),
-                    onTap: () => _showSettingsSheet(cardBg, textColor, subColor),
+                
+                const SizedBox(height: 24),
+
+                // Menu Items
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: const Border(top: BorderSide(color: Color(0xFFF1F5F9)), bottom: BorderSide(color: Color(0xFFF1F5F9))),
                   ),
-                ], cardBg),
-                const SizedBox(height: 12),
-                _section([
-                  _tile(Icons.delete_forever_rounded, 'Delete Account', Colors.red, cardBg,
-                      textColor, divColor,
-                      () => _showDeleteAccountDialog(cardBg, textColor, subColor)),
-                ], cardBg),
-                const SizedBox(height: 12),
-                _section([
-                  _tile(Icons.logout_rounded, 'Logout', Colors.red, cardBg,
-                      textColor, divColor, () async {
-                    final ok = await showDialog<bool>(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        backgroundColor: cardBg,
-                        title: Text('Logout?',
-                            style: TextStyle(color: textColor)),
-                        content: Text('Are you sure you want to logout?',
-                            style: TextStyle(color: subColor)),
-                        actions: [
-                          TextButton(
-                              onPressed: () => Navigator.pop(context, false),
-                              child: Text('Cancel',
-                                  style: TextStyle(color: subColor))),
-                          TextButton(
-                              onPressed: () => Navigator.pop(context, true),
-                              child: const Text('Logout',
-                                  style: TextStyle(color: Colors.red))),
-                        ],
-                      ),
-                    );
-                    if (ok == true) {
-                      await AuthService.logout();
-                      if (!mounted) return;
-                      Navigator.pushAndRemoveUntil(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => const LoginScreen()),
-                          (_) => false);
-                    }
-                  }),
-                ], cardBg),
+                  child: Column(children: [
+                    _premiumTile(Icons.place_rounded, 'Saved Places',
+                        const Color(0xFF3B82F6), () => Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const SavedPlacesScreen()))),
+                    _premiumTile(Icons.tune_rounded, 'Ride Preferences',
+                        const Color(0xFF6366F1), () => Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const RidePreferencesScreen()))),
+                    _premiumTile(Icons.card_membership_rounded, 'Monthly Pass',
+                        const Color(0xFFF59E0B), () => Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const MonthlyPassScreen()))),
+                    _premiumTile(Icons.wallet_giftcard_rounded, 'Refer & Earn',
+                        const Color(0xFFEC4899), () => Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const ReferralScreen()))),
+                    _premiumTile(Icons.search_rounded, 'Lost & Found', 
+                        const Color(0xFF7C3AED), () => Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const LostFoundScreen()))),
+                    _premiumTile(Icons.security_rounded, 'Emergency Contacts', 
+                        const Color(0xFFEF4444), () => Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => const EmergencyContactsScreen()))),
+                    _premiumTile(Icons.headset_mic_rounded, 'Help & Support',
+                        const Color(0xFF06B6D4), () {
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => const SupportChatScreen()));
+                        }),
+                    _premiumTile(Icons.settings_rounded, 'Settings', 
+                        const Color(0xFF64748B), () => _showSettingsSheet(cardBg, textColor, subColor), isLast: true),
+                  ]),
+                ),
+
+                const SizedBox(height: 24),
+
+                // Account Management
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: const Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                  ),
+                  child: Column(children: [
+                    _premiumTile(Icons.language_rounded, 'Language', 
+                        accentColor, () => _showProfileLanguageSheet(cardBg, textColor, subColor)),
+                    _premiumTile(Icons.delete_forever_rounded, 'Delete Account', 
+                        Colors.red, () => _showDeleteAccountDialog(cardBg, textColor, subColor)),
+                    _premiumTile(Icons.logout_rounded, 'Logout', 
+                        Colors.red, () async {
+                          final ok = await showDialog<bool>(
+                            context: context,
+                            builder: (_) => AlertDialog(
+                              backgroundColor: cardBg,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                              title: Text('Logout?', style: GoogleFonts.poppins(color: textColor, fontWeight: FontWeight.w600)),
+                              content: Text('Are you sure you want to logout from Jago?', style: GoogleFonts.poppins(color: subColor)),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Cancel', style: GoogleFonts.poppins(color: subColor))),
+                                TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Logout', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600))),
+                              ],
+                            ),
+                          );
+                          if (ok == true) {
+                            await AuthService.logout();
+                            if (!mounted) return;
+                            Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
+                          }
+                        }, isLast: true),
+                  ]),
+                ),
+
                 const SizedBox(height: 32),
                 Text('v2.01 • MindWhile IT Solutions',
-                    style: TextStyle(color: subColor, fontSize: 11)),
-                const SizedBox(height: 24),
+                    style: GoogleFonts.poppins(color: subColor, fontSize: 11, fontWeight: FontWeight.w400)),
+                const SizedBox(height: 48),
               ]),
             ),
     );
+  }
+
+  Widget _statItem(String label, String value, IconData icon, Color color) {
+    return Expanded(
+      child: Column(children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(14)),
+          child: Icon(icon, color: color, size: 22),
+        ),
+        const SizedBox(height: 10),
+        Text(value,
+            style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+                color: const Color(0xFF1E293B))),
+        Text(label,
+            style: GoogleFonts.poppins(fontSize: 10, color: const Color(0xFF94A3B8), fontWeight: FontWeight.w500)),
+      ]),
+    );
+  }
+
+  Widget _premiumTile(IconData icon, String label, Color color, VoidCallback onTap, {bool isLast = false}) {
+    return Column(children: [
+      ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+        leading: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(12)),
+          child: Icon(icon, color: color, size: 20),
+        ),
+        title: Text(label,
+            style: GoogleFonts.poppins(
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+                color: const Color(0xFF334155))),
+        trailing: const Icon(Icons.chevron_right_rounded, color: Color(0xFFCBD5E1), size: 24),
+        onTap: onTap,
+      ),
+      if (!isLast)
+        Padding(
+          padding: const EdgeInsets.only(left: 72),
+          child: Divider(height: 1, color: const Color(0xFFF1F5F9)),
+        ),
+    ]);
   }
 
   Widget _editField(String label, TextEditingController ctrl, Color textColor,
@@ -753,14 +790,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _section(List<Widget> children, Color cardBg) {
-    return Container(
-      color: cardBg,
-      child: Column(children: children),
-    );
-  }
-
-
   Future<String> _getSupportPhone() async {
     try {
       final r = await http.get(Uri.parse(ApiConfig.configs));
@@ -770,30 +799,5 @@ class _ProfileScreenState extends State<ProfileScreen> {
       }
     } catch (_) {}
     return '+916303000000';
-  }
-
-  Widget _tile(IconData icon, String label, Color color, Color cardBg,
-      Color textColor, Color divColor, VoidCallback onTap) {
-    return Column(children: [
-      ListTile(
-        leading: Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(8)),
-          child: Icon(icon, color: color, size: 20),
-        ),
-        title: Text(label,
-            style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-                color: textColor)),
-        trailing: Icon(Icons.chevron_right_rounded,
-            color: textColor.withValues(alpha: 0.3), size: 20),
-        onTap: onTap,
-      ),
-      Divider(height: 1, color: divColor, indent: 68),
-    ]);
   }
 }

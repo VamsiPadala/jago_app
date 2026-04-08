@@ -116,7 +116,6 @@ class _TripScreenState extends State<TripScreen> with TickerProviderStateMixin {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initMapMarkers();
       _fetchRouteForCurrentStatus();
-      if (_status == 'accepted' || _status == 'driver_assigned') _openNavigation();
       if (_status == 'in_progress' || _status == 'on_the_way') _startTripTimer();
       _validateActiveTrip();
     });
@@ -762,6 +761,14 @@ class _TripScreenState extends State<TripScreen> with TickerProviderStateMixin {
                 child: Text('Verify & Start Trip →',
                   style: GoogleFonts.poppins(fontWeight: FontWeight.w400, fontSize: 14)))),
             ]),
+            const SizedBox(height: 16),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _showCancelDialog();
+              },
+              child: Text('Trouble with OTP? Cancel Trip', 
+                style: GoogleFonts.poppins(color: JT.error, fontSize: 12, fontWeight: FontWeight.w400))),
           ]),
         ),
       ),
@@ -788,7 +795,9 @@ class _TripScreenState extends State<TripScreen> with TickerProviderStateMixin {
           _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(dLat, dLng), 15));
           await _fetchRoute(_center.latitude, _center.longitude, dLat, dLng);
         }
-        _showSnack('Trip started! Navigate to destination');
+        _showSnack('Trip started! Please follow the map to destination');
+        // Automatically open external navigation for the driver
+        _openNavigation();
         _showPickupPhotoPrompt(tripId);
       } else {
         final err = jsonDecode(res.body);
@@ -1449,7 +1458,7 @@ class _TripScreenState extends State<TripScreen> with TickerProviderStateMixin {
             const SizedBox(width: 6),
             Expanded(child: _pill('Distance',
               (double.tryParse((_trip?['estimatedDistance'] ?? 0).toString()) ?? 0) > 0
-                ? '${_trip!['estimatedDistance']} km' : '--', JT.primary)),
+                ? '${(double.parse(_trip!['estimatedDistance'].toString())).toStringAsFixed(1)} km' : '--', JT.primary)),
             const SizedBox(width: 6),
             Expanded(child: _pill('Pay', pmLabel, pmColor)),
           ]),
@@ -1668,7 +1677,7 @@ class _TripScreenState extends State<TripScreen> with TickerProviderStateMixin {
         }),
       _quickBtn(Icons.chat_rounded, 'Chat', JT.primary, _openTripChat),
       _quickBtn(Icons.navigation_rounded, 'Navigate', JT.primary, _openNavigation),
-      if (_status == 'accepted' || _status == 'driver_assigned')
+      if (_status == 'accepted' || _status == 'driver_assigned' || _status == 'arrived')
         _quickBtn(Icons.cancel_outlined, 'Cancel', JT.warning, _showCancelDialog),
       _quickBtn(Icons.sos_rounded, 'SOS', JT.error, _triggerSos),
     ]);

@@ -105,13 +105,28 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
   Future<void> _detectLocation() async {
     setState(() => _detectingLocation = true);
     try {
-      final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high).timeout(const Duration(seconds: 8));
-      final addr = await _reverseGeocode(pos.latitude, pos.longitude);
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        if (mounted) {
+          setState(() => _detectingLocation = false);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permission required')));
+        }
+        return;
+      }
+
+      var pos = await Geolocator.getLastKnownPosition();
+      if (pos == null || pos.latitude == 0) {
+        pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high).timeout(const Duration(seconds: 8));
+      }
+      final addr = await _reverseGeocode(pos!.latitude, pos!.longitude);
       if (!mounted) return;
       setState(() {
         _pickup = addr;
-        _pickupLat = pos.latitude;
-        _pickupLng = pos.longitude;
+        _pickupLat = pos!.latitude;
+        _pickupLng = pos!.longitude;
         _pickupCtrl.text = addr;
       });
     } catch (_) {

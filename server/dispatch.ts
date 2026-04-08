@@ -26,14 +26,14 @@ export interface DispatchConfig {
 }
 
 const DISPATCH_CONFIGS: Record<string, DispatchConfig> = {
-  // driverTimeoutMs=20s: FCM delivery (~3s) + app wake (~2s) + driver reads+decides (~12s) + buffer
-  bike:       { radiusStepsKm: [5, 8, 12, 15],    driverTimeoutMs: 20000, maxTotalTimeMs: 300000, driversPerStep: 10 },
-  auto:       { radiusStepsKm: [5, 8, 12, 15],    driverTimeoutMs: 20000, maxTotalTimeMs: 300000, driversPerStep: 10 },
-  cab:        { radiusStepsKm: [5, 8, 12, 15, 20],driverTimeoutMs: 20000, maxTotalTimeMs: 360000, driversPerStep: 10 },
-  parcel:     { radiusStepsKm: [5, 8, 12],         driverTimeoutMs: 20000, maxTotalTimeMs: 240000, driversPerStep: 8 },
-  b2b_parcel: { radiusStepsKm: [5, 10, 15],        driverTimeoutMs: 20000, maxTotalTimeMs: 300000, driversPerStep: 8 },
-  carpool:    { radiusStepsKm: [5, 8, 12, 20],     driverTimeoutMs: 20000, maxTotalTimeMs: 360000, driversPerStep: 10 },
-  outstation: { radiusStepsKm: [5, 10, 15, 25],    driverTimeoutMs: 20000, maxTotalTimeMs: 420000, driversPerStep: 10 },
+  // driverTimeoutMs=60s: extended for local testing
+  bike:       { radiusStepsKm: [5, 8, 12, 15],    driverTimeoutMs: 60000, maxTotalTimeMs: 300000, driversPerStep: 10 },
+  auto:       { radiusStepsKm: [5, 8, 12, 15],    driverTimeoutMs: 60000, maxTotalTimeMs: 300000, driversPerStep: 10 },
+  cab:        { radiusStepsKm: [5, 8, 12, 15, 20],driverTimeoutMs: 60000, maxTotalTimeMs: 360000, driversPerStep: 10 },
+  parcel:     { radiusStepsKm: [5, 8, 12],         driverTimeoutMs: 60000, maxTotalTimeMs: 240000, driversPerStep: 8 },
+  b2b_parcel: { radiusStepsKm: [5, 10, 15],        driverTimeoutMs: 60000, maxTotalTimeMs: 300000, driversPerStep: 8 },
+  carpool:    { radiusStepsKm: [5, 8, 12, 20],     driverTimeoutMs: 60000, maxTotalTimeMs: 360000, driversPerStep: 10 },
+  outstation: { radiusStepsKm: [5, 10, 15, 25],    driverTimeoutMs: 60000, maxTotalTimeMs: 420000, driversPerStep: 10 },
 };
 
 function getConfig(serviceType: string): DispatchConfig {
@@ -379,10 +379,14 @@ async function searchAndDispatchNextRadius(session: DispatchSession): Promise<vo
       );
     }
 
+    if (session.status !== "searching" && session.status !== "offered") return;
+
     if (drivers.length === 0) {
       // No drivers at this radius — try next
       session.radiusIndex++;
-      emitCustomerSearchStatus(session);
+      if (session.status === "searching" || session.status === "offered") {
+        emitCustomerSearchStatus(session);
+      }
       await searchAndDispatchNextRadius(session);
       return;
     }
@@ -392,7 +396,9 @@ async function searchAndDispatchNextRadius(session: DispatchSession): Promise<vo
     session.queueIndex = 0;
 
     // Notify customer about search progress
-    emitCustomerSearchStatus(session);
+    if (session.status === "searching" || session.status === "offered") {
+      emitCustomerSearchStatus(session);
+    }
 
     // Start dispatching sequentially
     await dispatchNextDriver(session);
@@ -691,6 +697,8 @@ async function findDriversInRadius(
   excludeDriverIds: string[],
   limit: number
 ): Promise<DriverMatchScore[]> {
+  console.log(`[DISPATCH] findDriversInRadius called: Lat=${pickupLat}, Lng=${pickupLng}, Radius=${radiusKm}km, Category=${vehicleCategoryId || 'any'}`);
+
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const safeIds = excludeDriverIds.filter((id) => uuidRe.test(id));
   const excludeClause = safeIds.length > 0
@@ -700,7 +708,7 @@ async function findDriversInRadius(
   // LEFT JOIN driver_details so pilots without a details row are still found
   // vehicle_category filter: match OR driver has no category set (new/incomplete profile)
   const vcFilter = vehicleCategoryId
-    ? rawSql`AND (dd.vehicle_category_id = ${vehicleCategoryId}::uuid OR dd.vehicle_category_id IS NULL OR dd.user_id IS NULL)`
+    ? rawSql`AND dd.vehicle_category_id = ${vehicleCategoryId}::uuid`
     : rawSql``;
 
   const drivers = await rawDb.execute(rawSql`
