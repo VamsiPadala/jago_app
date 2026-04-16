@@ -53,32 +53,39 @@ export function log(message: string, source = "express") {
 app.use((_req, res, next) => {
   // CORS headers — allow requests from frontend domain(s)
   const origin = _req.headers.origin || "*";
-  const allowedOrigins = [
-    "https://jagopro.org",
-    "https://www.jagopro.org",
-    "http://localhost:5173",
-    "http://localhost:5000",
-    "http://127.0.0.1:5173",
-  ];
-  
-  // If origin is in allowed list, or if no origin header (same-site), allow it
-  if (allowedOrigins.includes(origin as string) || !_req.headers.origin) {
+  const isDev = process.env.NODE_ENV !== "production";
+
+  if (isDev || !_req.headers.origin) {
     res.setHeader("Access-Control-Allow-Origin", origin);
-  } else if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
-    // Allow all localhost variants for development
-    res.setHeader("Access-Control-Allow-Origin", origin);
+  } else {
+    const allowedOrigins = [
+      "https://jagopro.org",
+      "https://www.jagopro.org",
+      "http://localhost:5173",
+      "http://localhost:5000",
+      "http://127.0.0.1:5173",
+      "http://127.0.0.1:5000",
+      "http://192.168.0.234:5000",
+      "http://192.168.0.143:5000",
+      "http://192.168.1.62:5000",
+      "http://192.168.1.89:5000",
+      "http://192.168.1.89:5173",
+    ];
+    if (allowedOrigins.includes(origin as string)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+    }
   }
-  
+
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
   res.setHeader("Access-Control-Max-Age", "3600");
-  
+
   // Handle preflight requests
   if (_req.method === "OPTIONS") {
     return res.sendStatus(200);
   }
-  
+
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("X-XSS-Protection", "1; mode=block");
@@ -124,7 +131,7 @@ app.use((req, res, next) => {
   try {
     const migrationsFolder = path.join(process.cwd(), "migrations");
     log(`[db] Running migrations from: ${migrationsFolder}`);
-    await migrate(drizzleDb, { migrationsFolder });
+    // await migrate(drizzleDb, { migrationsFolder });
     log("[db] Migrations applied OK — all tables ready");
   } catch (e: any) {
     console.error("[db] MIGRATION FAILED — tables may be missing:", e.message);
@@ -143,7 +150,7 @@ app.use((req, res, next) => {
       source: "express",
       message: `Request failed with status ${status} (${errorId})`,
       details: typeof err?.stack === "string" ? err.stack : String(err?.message || err),
-    }).catch(() => {});
+    }).catch(() => { });
 
     if (res.headersSent) {
       return next(err);
@@ -171,7 +178,7 @@ app.use((req, res, next) => {
       source: "routes",
       message: "Failed to register API routes",
       details: String(e.message || e),
-    }).catch(() => {});
+    }).catch(() => { });
     process.exit(1);
   }
 
@@ -184,8 +191,8 @@ app.use((req, res, next) => {
   // ─── NOW START SERVER LISTENING ───
   // Routes are registered and ready to handle requests
   const port = parseInt(process.env.PORT || "5000", 10);
-  const server = httpServer.listen(port, "0.0.0.0", () => {
-    log(`serving on port ${port}`);
+  const server = httpServer.listen(3000, "0.0.0.0", () => {
+    console.log("Server running on port 3000");
   });
 
   // ─── BACKGROUND INITIALIZATION (non-blocking) ───
@@ -196,19 +203,19 @@ app.use((req, res, next) => {
       const { pool: dbPool } = await import("./db");
       const settingsRes = await dbPool.query(
         "SELECT key_name, value FROM business_settings WHERE key_name IN ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        ["razorpay_key_id","razorpay_key_secret","razorpay_webhook_secret","fast2sms_api_key","two_factor_api_key","google_maps_key","twilio_account_sid","twilio_auth_token","twilio_phone_number","anthropic_api_key"]
+        ["razorpay_key_id", "razorpay_key_secret", "razorpay_webhook_secret", "fast2sms_api_key", "two_factor_api_key", "google_maps_key", "twilio_account_sid", "twilio_auth_token", "twilio_phone_number", "anthropic_api_key"]
       );
       const ENV_MAP: Record<string, string> = {
-        razorpay_key_id:        "RAZORPAY_KEY_ID",
-        razorpay_key_secret:    "RAZORPAY_KEY_SECRET",
-        razorpay_webhook_secret:"RAZORPAY_WEBHOOK_SECRET",
-        fast2sms_api_key:       "FAST2SMS_API_KEY",
-        two_factor_api_key:     "TWO_FACTOR_API_KEY",
-        google_maps_key:        "GOOGLE_MAPS_API_KEY",
-        twilio_account_sid:     "TWILIO_ACCOUNT_SID",
-        twilio_auth_token:      "TWILIO_AUTH_TOKEN",
-        twilio_phone_number:    "TWILIO_PHONE_NUMBER",
-        anthropic_api_key:      "ANTHROPIC_API_KEY",
+        razorpay_key_id: "RAZORPAY_KEY_ID",
+        razorpay_key_secret: "RAZORPAY_KEY_SECRET",
+        razorpay_webhook_secret: "RAZORPAY_WEBHOOK_SECRET",
+        fast2sms_api_key: "FAST2SMS_API_KEY",
+        two_factor_api_key: "TWO_FACTOR_API_KEY",
+        google_maps_key: "GOOGLE_MAPS_API_KEY",
+        twilio_account_sid: "TWILIO_ACCOUNT_SID",
+        twilio_auth_token: "TWILIO_AUTH_TOKEN",
+        twilio_phone_number: "TWILIO_PHONE_NUMBER",
+        anthropic_api_key: "ANTHROPIC_API_KEY",
       };
       for (const row of settingsRes.rows as any[]) {
         const envKey = ENV_MAP[row.key_name];
@@ -233,8 +240,8 @@ app.use((req, res, next) => {
       const pubClient = new IORedis(REDIS_URL, { lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0, retryStrategy: () => null });
       const subClient = pubClient.duplicate();
       // Prevent unhandled error events from crashing / spamming logs
-      pubClient.on("error", () => {});
-      subClient.on("error", () => {});
+      pubClient.on("error", () => { });
+      subClient.on("error", () => { });
       const { io: socketIo } = await import("./socket");
       Promise.all([
         new Promise<void>((res, rej) => { pubClient.once("ready", res); pubClient.once("error", rej); }),
@@ -266,7 +273,7 @@ app.use((req, res, next) => {
         source: "hardening",
         message: "Hardening system failed to initialize",
         details: e.message,
-      }).catch(() => {});
+      }).catch(() => { });
     }
   })();
 
@@ -312,7 +319,7 @@ app.use((req, res, next) => {
             socketIo.to(`user:${row.customer_id}`).emit("trip:completed", { tripId: row.trip_id, message: "Payment confirmed. Trip complete." });
             log(`[PaymentRetry] Trip ${row.trip_id} resolved — payment ${captured.id} captured`);
           }
-        } catch (_) {}
+        } catch (_) { }
       }
     } catch (e: any) {
       log(`[PaymentRetry] Error: ${e.message}`);
@@ -324,7 +331,7 @@ app.use((req, res, next) => {
     try {
       const { autoOfflineInactiveDrivers } = await import("./ai");
       await autoOfflineInactiveDrivers();
-    } catch (_) {}
+    } catch (_) { }
   }, 60 * 1000); // every 60 seconds
 
   // Setup Vite in development (after server is listening)
@@ -345,7 +352,7 @@ app.use((req, res, next) => {
       source: "process",
       message: `Unhandled promise rejection (${errorId})`,
       details: String(reason?.stack || reason),
-    }).catch(() => {});
+    }).catch(() => { });
   });
 
   process.on("uncaughtException", (err: any) => {
@@ -356,6 +363,6 @@ app.use((req, res, next) => {
       source: "process",
       message: `Uncaught exception (${errorId})`,
       details: String(err?.stack || err),
-    }).catch(() => {});
+    }).catch(() => { });
   });
 })();

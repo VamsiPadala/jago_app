@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shimmer/shimmer.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../config/api_config.dart';
@@ -67,9 +68,10 @@ class _LocationScreenState extends State<LocationScreen>
   List<Map<String, dynamic>> _recent = [];
   List<Map<String, dynamic>> _popular = [];
   bool _searching = false;
-  bool _activeField = false; // true = editing drop, false = editing stop
+  bool _activeField = true; // true = editing drop, false = editing stop
   String _activeQuery = '';
   Timer? _debounce;
+  String _sessionToken = ''; // Google Places Session Token for cost optimization
 
   // ── Animation ─────────────────────────────────────────────────────────────
   late AnimationController _slideCtrl;
@@ -98,6 +100,7 @@ class _LocationScreenState extends State<LocationScreen>
 
     _loadRecent();
     _fetchPopular();
+    _resetSessionToken();
     if (_pickup.isEmpty) _detectLocation();
 
     // Auto-focus drop field
@@ -316,48 +319,64 @@ class _LocationScreenState extends State<LocationScreen>
     }
   }
 
+  // ── Session Token ─────────────────────────────────────────────────────────
+  void _resetSessionToken() {
+    // Generate a fresh UUID-like token for a new search session
+    // This groups multiple keystrokes into 1 billable session
+    final rnd = DateTime.now().millisecondsSinceEpoch.toString();
+    setState(() => _sessionToken = 'sess-$rnd-${_pickupLat.toInt()}');
+  }
+
   // ── Search ────────────────────────────────────────────────────────────────
   void _onDropChanged(String q) {
     _activeQuery = q;
     _activeField = true;
     if (_debounce?.isActive == true) _debounce!.cancel();
-    if (q.length < 2) {
+    if (q.trim().length < 2) {
       setState(() {
         _searchResults = [];
         _searching = false;
       });
       return;
     }
-    _debounce = Timer(const Duration(milliseconds: 450), () => _search(q));
+    // 300ms debounce for Uber-like responsiveness (WAS 450ms)
+    _debounce = Timer(const Duration(milliseconds: 300), () => _search(q));
   }
 
   void _onStopChanged(String q) {
     _activeQuery = q;
     _activeField = false;
     if (_debounce?.isActive == true) _debounce!.cancel();
-    if (q.length < 2) {
+    if (q.trim().length < 2) {
       setState(() {
         _searchResults = [];
         _searching = false;
       });
       return;
     }
-    _debounce = Timer(const Duration(milliseconds: 450), () => _search(q));
+    _debounce = Timer(const Duration(milliseconds: 300), () => _search(q));
   }
 
   Future<void> _search(String query) async {
-    if (!mounted) return;
+    if (!mounted || query.trim().length < 2) return;
     setState(() => _searching = true);
     try {
       final headers = await AuthService.getHeaders();
       final lat = _pickupLat;
       final lng = _pickupLng;
+      
+      // Use the session token to optimize API costs
       final qp = StringBuffer('?query=${Uri.encodeComponent(query)}');
+      qp.write('&sessionToken=$_sessionToken');
+      
       if (lat != 0.0 && lng != 0.0) qp.write('&lat=$lat&lng=$lng');
+      
+      print('[PLACES] Searching: $query (session: $_sessionToken)');
       final r = await http.get(
         Uri.parse('${ApiConfig.placesAutocomplete}$qp'),
         headers: headers,
       ).timeout(const Duration(seconds: 6));
+      
       if (!mounted) return;
       if (r.statusCode == 200) {
         final data = jsonDecode(r.body) as Map<String, dynamic>;
@@ -378,8 +397,11 @@ class _LocationScreenState extends State<LocationScreen>
               .where((r) => (r['name'] as String).isNotEmpty)
               .toList();
         });
+        print('[PLACES] Found ${_searchResults.length} results');
       }
-    } catch (_) {}
+    } catch (e) {
+      print('[PLACES] Error: $e');
+    }
     if (mounted) setState(() => _searching = false);
   }
 
@@ -395,6 +417,7 @@ class _LocationScreenState extends State<LocationScreen>
       _searchResults = [];
     });
     FocusScope.of(context).unfocus();
+    _resetSessionToken(); // Reset token after a successful selection
     _tryProceed();
   }
 
@@ -427,7 +450,7 @@ class _LocationScreenState extends State<LocationScreen>
         final r = await http
             .get(
               Uri.parse(
-                  '${ApiConfig.placeDetails}?placeId=${Uri.encodeComponent(placeId)}'),
+                  '${ApiConfig.placeDetails}?placeId=${Uri.encodeComponent(placeId)}&sessionToken=$_sessionToken'),
               headers: headers,
             )
             .timeout(const Duration(seconds: 6));
@@ -970,26 +993,23 @@ class _LocationScreenState extends State<LocationScreen>
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
       children: [
         // Search results
-        if (isSearching && _searching)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 20),
-            child: Center(
-              child: CircularProgressIndicator(
-                  strokeWidth: 2, color: JT.primary),
-            ),
-          )
-        else if (isSearching && items.isNotEmpty) ...[
-          _sectionHeader('Search Results', Icons.search_rounded),
-          ...items.map((p) => _placeRow(
-                name: p['name']?.toString() ?? '',
-                icon: Icons.location_on_rounded,
-                iconColor: _accent,
-                onTap: () => _selectFromSearch(p, forDrop: _activeField),
-              )),
+        if (isSearching) ...[
+          if (_searching && items.isEmpty)
+            _buildShimmerLoading()
+          else if (items.isNotEmpty) ...[
+            _sectionHeader('Search Results', Icons.search_rounded),
+            ...items.map((p) => _placeRow(
+                  name: p['name']?.toString() ?? '',
+                  icon: Icons.location_on_rounded,
+                  iconColor: _accent,
+                  onTap: () => _selectFromSearch(p, forDrop: _activeField),
+                )),
+          ] else if (!_searching)
+            _buildNoResults(),
         ]
 
         // Default state: recent + popular
-        else if (!isSearching) ...[
+        else ...[
           // Recent places
           if (_recent.isNotEmpty) ...[
             _sectionHeader('Recent', Icons.history_rounded),
@@ -1092,6 +1112,37 @@ class _LocationScreenState extends State<LocationScreen>
               size: 18, color: JT.textSecondary),
         ]),
       ),
+    );
+  }
+
+  Widget _buildShimmerLoading() {
+    return Column(
+      children: List.generate(
+          5,
+          (i) => Shimmer.fromColors(
+                baseColor: Colors.grey[200]!,
+                highlightColor: Colors.white,
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  height: 60,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              )),
+    );
+  }
+
+  Widget _buildNoResults() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 40),
+      child: Column(children: [
+        Icon(Icons.location_off_rounded, color: JT.iconInactive, size: 48),
+        const SizedBox(height: 12),
+        Text('No locations found',
+            style: GoogleFonts.poppins(color: JT.textSecondary, fontSize: 13)),
+      ]),
     );
   }
 }

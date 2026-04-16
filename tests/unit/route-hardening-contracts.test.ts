@@ -59,7 +59,8 @@ describe("route hardening contracts", () => {
   });
 
   it("emits trip completion events to both direct user and trip room listeners", () => {
-    expect(routesSource).toContain('io.to(`user:${completedTrip.customerId}`).emit("trip:completed", {');
-    expect(routesSource).toContain('io.to(`trip:${tripId}`).emit("trip:completed", {');
+    // Completion is emitted via socketPayload variable to both direct user room and trip room
+    expect(routesSource).toContain('io.to(`user:${completedTrip.customerId}`).emit("trip:completed", socketPayload)');
+    expect(routesSource).toContain('io.to(`trip:${tripId}`).emit("trip:completed", socketPayload)');
   });
 });

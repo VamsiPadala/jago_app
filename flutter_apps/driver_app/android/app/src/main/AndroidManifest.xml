@@ -36,6 +36,15 @@
             <data android:scheme="http"/>
         </intent>
         <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="google.navigation" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
+        </intent>
+        <package android:name="com.google.android.apps.maps" />
+        <intent>
             <action android:name="android.intent.action.SENDTO"/>
             <data android:scheme="smsto"/>
         </intent>
@@ -43,7 +52,8 @@
 
     <application
         android:label="JAGO Pro Pilot"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
 
         <meta-data
             android:name="com.google.android.geo.API_KEY"
@@ -80,5 +90,10 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_color"
             android:resource="@color/notification_color"/>
+
+        <!-- Disable Impeller to prevent "Lost connection" crashes on some Android devices -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
     </application>
 </manifest>

@@ -122,72 +122,93 @@ class FcmService {
     if (_initialized) return;
     _initialized = true;
 
-    final messaging = FirebaseMessaging.instance;
+    try {
+      final messaging = FirebaseMessaging.instance;
 
-    // Request permission (Android 13+, iOS)
-    await messaging.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-      criticalAlert: true,
-    );
+      // Request permission (Android 13+, iOS)
+      await messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+        criticalAlert: true,
+      ).timeout(const Duration(seconds: 10), onTimeout: () => const NotificationSettings(
+        alert: AppleNotificationSetting.disabled,
+        announcement: AppleNotificationSetting.disabled,
+        authorizationStatus: AuthorizationStatus.notDetermined,
+        badge: AppleNotificationSetting.disabled,
+        carPlay: AppleNotificationSetting.disabled,
+        lockScreen: AppleNotificationSetting.disabled,
+        notificationCenter: AppleNotificationSetting.disabled,
+        showPreviews: AppleShowPreviewSetting.never,
+        sound: AppleNotificationSetting.disabled,
+        criticalAlert: AppleNotificationSetting.disabled,
+        timeSensitive: AppleNotificationSetting.disabled,
+        providesAppNotificationSettings: AppleNotificationSetting.disabled,
+      ));
 
-    // Allow foreground FCM to trigger onMessage (we handle it ourselves)
-    await messaging.setForegroundNotificationPresentationOptions(
-      alert: false, badge: true, sound: false,
-    );
+      // Allow foreground FCM to trigger onMessage (we handle it ourselves)
+      await messaging.setForegroundNotificationPresentationOptions(
+        alert: false, badge: true, sound: false,
+      );
 
-    // ── Android notification channels ──────────────────────────────────────
-    const tripAlertChannel = AndroidNotificationChannel(
-      'trip_alerts',
-      'Trip Alerts',
-      description: 'Full-screen incoming ride and parcel alerts',
-      importance: Importance.max,
-      playSound: true,
-      sound: RawResourceAndroidNotificationSound('trip_alert'),
-      enableVibration: true,
-      showBadge: true,
-    );
-    const tripUpdateChannel = AndroidNotificationChannel(
-      'trip_updates',
-      'Trip Updates',
-      description: 'Status updates for active trips',
-      importance: Importance.high,
-    );
+      // ── Android notification channels ──────────────────────────────────────
+      const tripAlertChannel = AndroidNotificationChannel(
+        'trip_alerts',
+        'Trip Alerts',
+        description: 'Full-screen incoming ride and parcel alerts',
+        importance: Importance.max,
+        playSound: true,
+        sound: RawResourceAndroidNotificationSound('trip_alert'),
+        enableVibration: true,
+        showBadge: true,
+      );
+      const tripUpdateChannel = AndroidNotificationChannel(
+        'trip_updates',
+        'Trip Updates',
+        description: 'Status updates for active trips',
+        importance: Importance.high,
+      );
 
-    final androidPlugin = _localNotif
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    await androidPlugin?.createNotificationChannel(tripAlertChannel);
-    await androidPlugin?.createNotificationChannel(tripUpdateChannel);
-    await androidPlugin?.requestExactAlarmsPermission();
+      final androidPlugin = _localNotif
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await androidPlugin?.createNotificationChannel(tripAlertChannel);
+      await androidPlugin?.createNotificationChannel(tripUpdateChannel);
+      await androidPlugin?.requestExactAlarmsPermission();
 
-    // ── Local notifications init ────────────────────────────────────────────
-    const initSettings = InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      iOS: DarwinInitializationSettings(
-        requestAlertPermission: false,
-        requestBadgePermission: false,
-        requestSoundPermission: false,
-      ),
-    );
-    await _localNotif.initialize(
-      initSettings,
-      onDidReceiveNotificationResponse: _onLocalNotifTap,
-      onDidReceiveBackgroundNotificationResponse: _onBackgroundNotifTap,
-    );
+      // ── Local notifications init ────────────────────────────────────────────
+      const initSettings = InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: DarwinInitializationSettings(
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
+      );
+      await _localNotif.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: _onLocalNotifTap,
+        onDidReceiveBackgroundNotificationResponse: _onBackgroundNotifTap,
+      );
 
-    // ── Register handlers ───────────────────────────────────────────────────
-    FirebaseMessaging.onBackgroundMessage(firebaseBackgroundMessageHandler);
-    FirebaseMessaging.onMessage.listen(_onForegroundMessage);
-    FirebaseMessaging.onMessageOpenedApp.listen(_onNotificationOpened);
+      // ── Register handlers ───────────────────────────────────────────────────
+      FirebaseMessaging.onBackgroundMessage(firebaseBackgroundMessageHandler);
+      FirebaseMessaging.onMessage.listen(_onForegroundMessage);
+      FirebaseMessaging.onMessageOpenedApp.listen(_onNotificationOpened);
 
-    // App launched from terminated state via notification tap
-    final initialMsg = await messaging.getInitialMessage();
-    if (initialMsg != null) _handleMessageData(initialMsg.data);
+      // App launched from terminated state via notification tap
+      try {
+        final initialMsg = await messaging.getInitialMessage();
+        if (initialMsg != null) _handleMessageData(initialMsg.data);
+      } catch (e) {
+        debugPrint('[FCM-PILOT] ❌ getInitialMessage error: $e');
+      }
 
-    // Save FCM token
-    await _saveFcmToken();
-    messaging.onTokenRefresh.listen((token) => _saveTokenToServer(token));
+      // Save FCM token
+      _saveFcmToken(); // Run in background
+      messaging.onTokenRefresh.listen((token) => _saveTokenToServer(token));
+    } catch (e) {
+      debugPrint('[FCM-PILOT] ❌ Fatal error in FcmService.init(): $e');
+    }
   }
 
   // ── FOREGROUND MESSAGE ─────────────────────────────────────────────────────

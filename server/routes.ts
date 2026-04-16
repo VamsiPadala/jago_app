@@ -338,7 +338,7 @@ async function detectZoneId(lat: number, lng: number): Promise<string | null> {
             if (poly?.[0] && pointInPolygon(lat, lng, poly[0])) return z.id as string;
           }
         }
-      } catch {}
+      } catch { }
     }
     // Pass 2: radius-based fallback for zones without polygon
     for (const z of zones.rows as any[]) {
@@ -350,7 +350,7 @@ async function detectZoneId(lat: number, lng: number): Promise<string | null> {
       const r = Number(z.radius_km || 5);
       if (d <= r) return z.id as string;
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -565,7 +565,7 @@ async function parseVoiceIntentWithClaude(text: string): Promise<any | null> {
     const dbR = await rawDb.execute(rawSql`SELECT value FROM business_settings WHERE key_name='anthropic_api_key' LIMIT 1`);
     const dbKey = (dbR.rows[0] as any)?.value?.trim();
     if (dbKey) apiKey = dbKey;
-  } catch (_) {}
+  } catch (_) { }
   if (!apiKey) return null;
   try {
     const Anthropic = (await import("@anthropic-ai/sdk")).default;
@@ -680,7 +680,7 @@ async function parseVoiceIntentOrchestrated(text: string): Promise<{ parsed: any
         },
       };
     }
-  } catch (_) {} // end external microservice block
+  } catch (_) { } // end external microservice block
 
   // 2. Claude AI (Haiku) � fast, cheap, understands Telugu/Hindi/all Indian languages
   const claudeParsed = await parseVoiceIntentWithClaude(text);
@@ -755,13 +755,13 @@ async function requireAdminAuth(req: Request, res: Response, next: NextFunction)
 async function ensureAdminExists() {
   const adminEmail = (process.env.ADMIN_EMAIL || "").trim().toLowerCase();
   if (!adminEmail) { console.error("[SECURITY] ADMIN_EMAIL env var not set � skipping admin sync."); return; }
-  const adminName  = (process.env.ADMIN_NAME  || "Admin").trim() || "Admin";
+  const adminName = (process.env.ADMIN_NAME || "Admin").trim() || "Admin";
   const adminPassword = process.env.ADMIN_PASSWORD;
   if (!adminPassword) {
     console.error("[SECURITY] ADMIN_PASSWORD env var not set � skipping admin password sync. Set ADMIN_PASSWORD in .do/app.yaml or .env");
     return;
   }
-  
+
   console.log(`[admin-bootstrap] Starting admin sync for ${adminEmail}, sync_on_restart=${process.env.ADMIN_PASSWORD_SYNC_ON_RESTART}`);
 
 
@@ -801,9 +801,9 @@ async function ensureAdminExists() {
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )
     `);
-  } catch (_) {}
-  try { await rawDb.execute(rawSql`CREATE INDEX IF NOT EXISTS idx_admins_auth_token ON admins(auth_token)`); } catch (_) {}
-  try { await rawDb.execute(rawSql`CREATE INDEX IF NOT EXISTS idx_admin_login_otp_admin_created ON admin_login_otp(admin_id, created_at DESC)`); } catch (_) {}
+  } catch (_) { }
+  try { await rawDb.execute(rawSql`CREATE INDEX IF NOT EXISTS idx_admins_auth_token ON admins(auth_token)`); } catch (_) { }
+  try { await rawDb.execute(rawSql`CREATE INDEX IF NOT EXISTS idx_admin_login_otp_admin_created ON admin_login_otp(admin_id, created_at DESC)`); } catch (_) { }
 
   // -- Step 2: Seed / sync admin account using rawDb (never uses Drizzle ORM table refs)
   try {
@@ -977,8 +977,8 @@ async function ensureOperationalSchema() {
       -- Referral code: unique per user, generated at registration
       ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(30);
       -- Backfill existing users who don't have a referral code yet
-      UPDATE users SET referral_code = 'JAGOPRO' || RIGHT(phone, 6)
-        WHERE referral_code IS NULL AND phone IS NOT NULL AND LENGTH(phone) >= 6;
+      UPDATE users SET referral_code = 'JAGO' || RIGHT(phone, 4) || UPPER(SUBSTRING(id::text from 1 for 4))
+        WHERE referral_code IS NULL AND phone IS NOT NULL AND LENGTH(phone) >= 4;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code) WHERE referral_code IS NOT NULL;
 
       -- Commission Settlement: per-driver pending balance tracking
@@ -1863,6 +1863,31 @@ async function ensureOperationalSchema() {
       ON CONFLICT (code) DO NOTHING;
     `).catch(dbCatch("db"));
 
+    // -- Trip Status History and Ride Events Tables ---------------------------
+    await rawDb.execute(rawSql`
+      CREATE TABLE IF NOT EXISTS trip_status (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        trip_id UUID NOT NULL,
+        status VARCHAR(60) NOT NULL,
+        source VARCHAR(40) DEFAULT 'system',
+        note TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_trip_status_trip_id ON trip_status(trip_id);
+      CREATE INDEX IF NOT EXISTS idx_trip_status_created_at ON trip_status(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ride_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        trip_id UUID NOT NULL,
+        event_type VARCHAR(100) NOT NULL,
+        actor_id UUID,
+        actor_type VARCHAR(40) DEFAULT 'system',
+        meta JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_ride_events_trip_id ON ride_events(trip_id);
+    `).catch(dbCatch("db"));
+
   } catch (e: any) {
     console.error("[schema] ensureOperationalSchema error:", formatDbError(e));
   }
@@ -1949,7 +1974,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const adminEmail = (process.env.ADMIN_EMAIL || "").trim().toLowerCase();
       const adminPassword = process.env.ADMIN_PASSWORD;
       const syncOnRestart = process.env.ADMIN_PASSWORD_SYNC_ON_RESTART;
-      
+
       if (!adminEmail) {
         return res.json({ error: "ADMIN_EMAIL not configured", config: { adminEmail: null } });
       }
@@ -2041,44 +2066,72 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // -- 1. Vehicle categories (upsert by name) ------------------------------
       const vehicles = [
         // RIDE services
-        { name: "Bike", type: "motor_bike", vehicle_type: "bike", icon: "/vehicles/bike.svg",
-          base_fare: 30, fare_per_km: 7, minimum_fare: 30, waiting_charge_per_min: 0.5 },
-        { name: "Auto", type: "auto", vehicle_type: "auto", icon: "/vehicles/auto.svg",
-          base_fare: 30, fare_per_km: 12, minimum_fare: 45, waiting_charge_per_min: 1 },
-        { name: "Mini Car", type: "car", vehicle_type: "mini_car", icon: "/vehicles/mini_car.svg",
-          base_fare: 70, fare_per_km: 14, minimum_fare: 90, waiting_charge_per_min: 1.5 },
-        { name: "Sedan", type: "car", vehicle_type: "sedan", icon: "/vehicles/sedan.svg",
-          base_fare: 90, fare_per_km: 16, minimum_fare: 130, waiting_charge_per_min: 2 },
-        { name: "SUV / XL", type: "car", vehicle_type: "suv", icon: "/vehicles/suv.svg",
-          base_fare: 120, fare_per_km: 20, minimum_fare: 170, waiting_charge_per_min: 2.5 },
+        {
+          name: "Bike", type: "motor_bike", vehicle_type: "bike", icon: "/vehicles/bike.svg",
+          base_fare: 30, fare_per_km: 7, minimum_fare: 30, waiting_charge_per_min: 0.5
+        },
+        {
+          name: "Auto", type: "auto", vehicle_type: "auto", icon: "/vehicles/auto.svg",
+          base_fare: 30, fare_per_km: 12, minimum_fare: 45, waiting_charge_per_min: 1
+        },
+        {
+          name: "Mini Car", type: "car", vehicle_type: "mini_car", icon: "/vehicles/mini_car.svg",
+          base_fare: 70, fare_per_km: 14, minimum_fare: 90, waiting_charge_per_min: 1.5
+        },
+        {
+          name: "Sedan", type: "car", vehicle_type: "sedan", icon: "/vehicles/sedan.svg",
+          base_fare: 90, fare_per_km: 16, minimum_fare: 130, waiting_charge_per_min: 2
+        },
+        {
+          name: "SUV / XL", type: "car", vehicle_type: "suv", icon: "/vehicles/suv.svg",
+          base_fare: 120, fare_per_km: 20, minimum_fare: 170, waiting_charge_per_min: 2.5
+        },
         // LOCAL POOL services
-        { name: "Mini Pool", type: "car", vehicle_type: "pool_mini", icon: "/vehicles/pool_mini.svg",
+        {
+          name: "Mini Pool", type: "car", vehicle_type: "pool_mini", icon: "/vehicles/pool_mini.svg",
           base_fare: 40, fare_per_km: 9, minimum_fare: 55, waiting_charge_per_min: 1, total_seats: 3, is_carpool: true,
-          description: "Upto 3 riders � Shared mini cab � Save 35%" },
-        { name: "Sedan Pool", type: "car", vehicle_type: "pool_sedan", icon: "/vehicles/pool_sedan.svg",
+          description: "Upto 3 riders � Shared mini cab � Save 35%"
+        },
+        {
+          name: "Sedan Pool", type: "car", vehicle_type: "pool_sedan", icon: "/vehicles/pool_sedan.svg",
           base_fare: 50, fare_per_km: 10, minimum_fare: 70, waiting_charge_per_min: 1, total_seats: 4, is_carpool: true,
-          description: "Upto 4 riders � Shared sedan � Save 35%" },
-        { name: "SUV Pool", type: "car", vehicle_type: "pool_suv", icon: "/vehicles/pool_suv.svg",
+          description: "Upto 4 riders � Shared sedan � Save 35%"
+        },
+        {
+          name: "SUV Pool", type: "car", vehicle_type: "pool_suv", icon: "/vehicles/pool_suv.svg",
           base_fare: 60, fare_per_km: 12, minimum_fare: 80, waiting_charge_per_min: 1.5, total_seats: 6, is_carpool: true,
-          description: "Upto 6 riders � Shared SUV � Save 30%" },
-        { name: "Car Pool", type: "car", vehicle_type: "carpool", icon: "/vehicles/carpool.svg",
-          base_fare: 40, fare_per_km: 8, minimum_fare: 60, waiting_charge_per_min: 1, total_seats: 4 },
+          description: "Upto 6 riders � Shared SUV � Save 30%"
+        },
+        {
+          name: "Car Pool", type: "car", vehicle_type: "carpool", icon: "/vehicles/carpool.svg",
+          base_fare: 40, fare_per_km: 8, minimum_fare: 60, waiting_charge_per_min: 1, total_seats: 4
+        },
         // PARCEL / PORTER-style services
-        { name: "Bike Delivery", type: "motor_bike", vehicle_type: "bike_parcel", icon: "/vehicles/parcel_bike.svg",
+        {
+          name: "Bike Delivery", type: "motor_bike", vehicle_type: "bike_parcel", icon: "/vehicles/parcel_bike.svg",
           base_fare: 70, fare_per_km: 8, minimum_fare: 70, waiting_charge_per_min: 0.5, service_type: "parcel",
-          description: "Upto 10 kg � 0.3 CBM � Small packages, documents" },
-        { name: "3-Wheeler / Auto", type: "auto", vehicle_type: "auto_parcel", icon: "/vehicles/parcel_auto.svg",
+          description: "Upto 10 kg � 0.3 CBM � Small packages, documents"
+        },
+        {
+          name: "3-Wheeler / Auto", type: "auto", vehicle_type: "auto_parcel", icon: "/vehicles/parcel_auto.svg",
           base_fare: 140, fare_per_km: 12, minimum_fare: 140, waiting_charge_per_min: 1, service_type: "parcel",
-          description: "Upto 150 kg � 1.5 CBM � Medium goods, household items" },
-        { name: "Tata Ace", type: "car", vehicle_type: "tata_ace", icon: "/vehicles/tata_ace.svg",
+          description: "Upto 150 kg � 1.5 CBM � Medium goods, household items"
+        },
+        {
+          name: "Tata Ace", type: "car", vehicle_type: "tata_ace", icon: "/vehicles/tata_ace.svg",
           base_fare: 350, fare_per_km: 18, minimum_fare: 350, waiting_charge_per_min: 2, service_type: "parcel",
-          description: "Upto 750 kg � 6 CBM � Furniture, appliances, bulk goods" },
-        { name: "Bolero Pickup", type: "car", vehicle_type: "bolero_pickup", icon: "/vehicles/bolero.svg",
+          description: "Upto 750 kg � 6 CBM � Furniture, appliances, bulk goods"
+        },
+        {
+          name: "Bolero Pickup", type: "car", vehicle_type: "bolero_pickup", icon: "/vehicles/bolero.svg",
           base_fare: 500, fare_per_km: 22, minimum_fare: 500, waiting_charge_per_min: 2.5, service_type: "parcel",
-          description: "Upto 1500 kg � 10 CBM � Heavy goods, office shifting" },
-        { name: "Tata 407 / Tempo", type: "car", vehicle_type: "tempo_407", icon: "/vehicles/tempo_407.svg",
+          description: "Upto 1500 kg � 10 CBM � Heavy goods, office shifting"
+        },
+        {
+          name: "Tata 407 / Tempo", type: "car", vehicle_type: "tempo_407", icon: "/vehicles/tempo_407.svg",
           base_fare: 800, fare_per_km: 28, minimum_fare: 800, waiting_charge_per_min: 3, service_type: "parcel",
-          description: "Upto 2500 kg � 20 CBM � Large loads, factory goods, full shifting" },
+          description: "Upto 2500 kg � 20 CBM � Large loads, factory goods, full shifting"
+        },
       ];
 
       // -- 0. Ensure auxiliary tables exist -------------------------------------
@@ -2240,8 +2293,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const surges = [
         { reason: "Morning Peak", start_time: "07:00", end_time: "10:00", multiplier: 1.3 },
         { reason: "Evening Peak", start_time: "17:00", end_time: "21:00", multiplier: 1.4 },
-        { reason: "Night Ride",   start_time: "23:00", end_time: "05:00", multiplier: 1.2 },
-        { reason: "Weekend",      start_time: "10:00", end_time: "23:00", multiplier: 1.15 },
+        { reason: "Night Ride", start_time: "23:00", end_time: "05:00", multiplier: 1.2 },
+        { reason: "Weekend", start_time: "10:00", end_time: "23:00", multiplier: 1.15 },
       ];
       for (const s of surges) {
         const ex = await rawDb.execute(rawSql`SELECT id FROM surge_pricing WHERE reason=${s.reason} LIMIT 1`);
@@ -2256,32 +2309,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // -- 5. Revenue model settings (upsert correct values) --------------------
       const revenueSettings: Record<string, string> = {
         // GST
-        ride_gst_rate:               '5',    // 5% GST on every ride
-        parcel_gst_rate:             '18',   // 18% GST on parcel
+        ride_gst_rate: '5',    // 5% GST on every ride
+        parcel_gst_rate: '18',   // 18% GST on parcel
         // Commission model
-        commission_rate:             '15',   // 15% commission per ride
-        commission_pct:              '15',
-        driver_commission_pct:       '15',
+        commission_rate: '15',   // 15% commission per ride
+        commission_pct: '15',
+        driver_commission_pct: '15',
         commission_insurance_per_ride: '2',  // ?2 insurance per ride (optional, can set 0)
-        commission_mode:             'on',
+        commission_mode: 'on',
         // Subscription model (like Rapido)
-        subscription_mode:           'on',
-        sub_platform_fee_per_ride:   '5',    // ?5 platform fee per ride for subscription drivers
-        subscription_enabled:        'true',
+        subscription_mode: 'on',
+        sub_platform_fee_per_ride: '5',    // ?5 platform fee per ride for subscription drivers
+        subscription_enabled: 'true',
         // Hybrid model
-        hybrid_commission_pct:       '10',   // 10% commission in hybrid
+        hybrid_commission_pct: '10',   // 10% commission in hybrid
         hybrid_platform_fee_per_ride: '5',
-        hybrid_insurance_per_ride:   '2',
+        hybrid_insurance_per_ride: '2',
         // Auto-lock thresholds
-        auto_lock_threshold:         '-200', // Lock when wallet < -?200
-        commission_lock_threshold:   '200',  // Lock when pending dues >= ?200
+        auto_lock_threshold: '-200', // Lock when wallet < -?200
+        commission_lock_threshold: '200',  // Lock when pending dues >= ?200
         // Per-service models (admin can change these)
-        rides_model:                 'subscription', // default: subscription for rides
-        parcels_model:               'commission',   // default: commission for parcel
-        cargo_model:                 'commission',
-        intercity_model:             'commission',
+        rides_model: 'subscription', // default: subscription for rides
+        parcels_model: 'commission',   // default: commission for parcel
+        cargo_model: 'commission',
+        intercity_model: 'commission',
         // Launch campaign � 30-day free period for every new driver
-        launch_campaign_enabled:     'true',
+        launch_campaign_enabled: 'true',
       };
       for (const [key, value] of Object.entries(revenueSettings)) {
         await rawDb.execute(rawSql`
@@ -2293,14 +2346,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       // -- 6. Subscription plans (like Rapido) ----------------------------------
       const plans = [
-        { name: "Daily Pass",    price: 29,  duration_days: 1,  max_rides: 10,  plan_type: "driver",
-          features: "10 rides/day � ?5 platform fee/ride � No commission" },
-        { name: "Weekly Pass",   price: 149, duration_days: 7,  max_rides: 70,  plan_type: "driver",
-          features: "70 rides/week � ?5 platform fee/ride � No commission � Save 27%" },
-        { name: "Monthly Pass",  price: 499, duration_days: 30, max_rides: 300, plan_type: "driver",
-          features: "300 rides/month � ?5 platform fee/ride � No commission � Save 43%" },
-        { name: "Pro Monthly",   price: 799, duration_days: 30, max_rides: 500, plan_type: "driver",
-          features: "500 rides/month � ?3 platform fee/ride � Priority dispatch � Save 55%" },
+        {
+          name: "Daily Pass", price: 29, duration_days: 1, max_rides: 10, plan_type: "driver",
+          features: "10 rides/day � ?5 platform fee/ride � No commission"
+        },
+        {
+          name: "Weekly Pass", price: 149, duration_days: 7, max_rides: 70, plan_type: "driver",
+          features: "70 rides/week � ?5 platform fee/ride � No commission � Save 27%"
+        },
+        {
+          name: "Monthly Pass", price: 499, duration_days: 30, max_rides: 300, plan_type: "driver",
+          features: "300 rides/month � ?5 platform fee/ride � No commission � Save 43%"
+        },
+        {
+          name: "Pro Monthly", price: 799, duration_days: 30, max_rides: 500, plan_type: "driver",
+          features: "500 rides/month � ?3 platform fee/ride � Priority dispatch � Save 55%"
+        },
       ];
       const insertedPlans: any[] = [];
       for (const p of plans) {
@@ -2660,50 +2721,50 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         `),
       ]);
 
-      const trips  = (tripsR.rows[0] as any) || {};
-      const drv    = (driversR.rows[0] as any) || {};
-      const cust   = (customersR.rows[0] as any) || {};
+      const trips = (tripsR.rows[0] as any) || {};
+      const drv = (driversR.rows[0] as any) || {};
+      const cust = (customersR.rows[0] as any) || {};
       const wallet = (walletR.rows[0] as any) || {};
-      const subs   = (subscriptionsR.rows[0] as any) || {};
-      const cp     = (carpoolR.rows[0] as any) || {};
-      const parcels= (parcelsR.rows[0] as any) || {};
-      const opool  = (outstationR.rows[0] as any) || {};
+      const subs = (subscriptionsR.rows[0] as any) || {};
+      const cp = (carpoolR.rows[0] as any) || {};
+      const parcels = (parcelsR.rows[0] as any) || {};
+      const opool = (outstationR.rows[0] as any) || {};
       const svcSettings: Record<string, string> = {};
       for (const row of settingsR.rows as any[]) svcSettings[row.key_name] = row.value;
 
       res.json({
         summary: {
-          totalTrips:             parseInt(trips.total_trips || 0),
-          completedTrips:         parseInt(trips.completed_trips || 0),
-          cancelledTrips:         parseInt(trips.cancelled_trips || 0),
-          activeTrips:            parseInt(trips.active_trips || 0),
-          totalRevenue:           parseFloat(trips.total_revenue || 0),
-          todayTrips:             parseInt(trips.today_trips || 0),
-          todayRevenue:           parseFloat(trips.today_revenue || 0),
-          weekTrips:              parseInt(trips.week_trips || 0),
-          weekRevenue:            parseFloat(trips.week_revenue || 0),
-          monthTrips:             parseInt(trips.month_trips || 0),
-          monthRevenue:           parseFloat(trips.month_revenue || 0),
+          totalTrips: parseInt(trips.total_trips || 0),
+          completedTrips: parseInt(trips.completed_trips || 0),
+          cancelledTrips: parseInt(trips.cancelled_trips || 0),
+          activeTrips: parseInt(trips.active_trips || 0),
+          totalRevenue: parseFloat(trips.total_revenue || 0),
+          todayTrips: parseInt(trips.today_trips || 0),
+          todayRevenue: parseFloat(trips.today_revenue || 0),
+          weekTrips: parseInt(trips.week_trips || 0),
+          weekRevenue: parseFloat(trips.week_revenue || 0),
+          monthTrips: parseInt(trips.month_trips || 0),
+          monthRevenue: parseFloat(trips.month_revenue || 0),
           totalCommissionCollected: parseFloat(trips.total_commission_collected || 0),
-          totalGstCollected:      parseFloat(trips.total_gst_collected || 0),
+          totalGstCollected: parseFloat(trips.total_gst_collected || 0),
         },
         services: {
-          rides:       { trips: parseInt(trips.ride_trips || 0), revenue: parseFloat(trips.ride_revenue || 0), model: svcSettings['rides_model'] || 'subscription' },
-          parcels:     { trips: parseInt(parcels.total_parcel_trips || 0), revenue: parseFloat(parcels.parcel_revenue || 0), model: svcSettings['parcels_model'] || 'commission' },
-          carpool:     { trips: parseInt(cp.total_carpool_trips || 0), revenue: parseFloat(cp.carpool_revenue || 0), model: svcSettings['intercity_model'] || 'commission' },
+          rides: { trips: parseInt(trips.ride_trips || 0), revenue: parseFloat(trips.ride_revenue || 0), model: svcSettings['rides_model'] || 'subscription' },
+          parcels: { trips: parseInt(parcels.total_parcel_trips || 0), revenue: parseFloat(parcels.parcel_revenue || 0), model: svcSettings['parcels_model'] || 'commission' },
+          carpool: { trips: parseInt(cp.total_carpool_trips || 0), revenue: parseFloat(cp.carpool_revenue || 0), model: svcSettings['intercity_model'] || 'commission' },
           outstationPool: { rides: parseInt(opool.total_outstation_rides || 0), bookings: parseInt(opool.total_outstation_bookings || 0), revenue: parseFloat(opool.outstation_revenue || 0), model: svcSettings['outstation_pool_model'] || 'commission', mode: svcSettings['outstation_pool_mode'] || 'off' },
         },
         drivers: {
-          total:               parseInt(drv.total_drivers || 0),
-          active:              parseInt(drv.active_drivers || 0),
-          online:              parseInt(wallet.online_drivers || 0),
-          locked:              parseInt(drv.locked_drivers || 0),
+          total: parseInt(drv.total_drivers || 0),
+          active: parseInt(drv.active_drivers || 0),
+          online: parseInt(wallet.online_drivers || 0),
+          locked: parseInt(drv.locked_drivers || 0),
           totalPendingCommission: parseFloat(drv.total_pending_commission || 0),
           activeSubscriptions: parseInt(subs.active_subscriptions || 0),
         },
         customers: {
-          total:       parseInt(cust.total_customers || 0),
-          active:      parseInt(cust.active_customers || 0),
+          total: parseInt(cust.total_customers || 0),
+          active: parseInt(cust.active_customers || 0),
           newThisMonth: parseInt(cust.new_this_month || 0),
         },
         serviceSettings: svcSettings,
@@ -2769,33 +2830,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         `),
       ]);
 
-      const live    = (liveR.rows[0] as any) || {};
-      const cancel  = (cancelR.rows[0] as any) || {};
-      const ghost   = (ghostR.rows[0] as any) || {};
+      const live = (liveR.rows[0] as any) || {};
+      const cancel = (cancelR.rows[0] as any) || {};
+      const ghost = (ghostR.rows[0] as any) || {};
       const penalty = (penaltyR.rows[0] as any) || {};
-      const eta     = (etaR.rows[0] as any) || {};
+      const eta = (etaR.rows[0] as any) || {};
       const surgeZones = (surgeR.rows as any[]).map(z => ({ name: z.name, factor: parseFloat(z.surge_factor) }));
 
       res.json({
         live: {
-          searching:           parseInt(live.searching || 0),
-          dispatching:         parseInt(live.dispatching || 0),
-          arrived:             parseInt(live.arrived || 0),
-          inProgress:          parseInt(live.in_progress || 0),
-          completedLastHour:   parseInt(live.completed_last_hour || 0),
-          cancelledLastHour:   parseInt(live.cancelled_last_hour || 0),
-          avgPickupWaitMin:    parseFloat(live.avg_pickup_wait_min || 0),
+          searching: parseInt(live.searching || 0),
+          dispatching: parseInt(live.dispatching || 0),
+          arrived: parseInt(live.arrived || 0),
+          inProgress: parseInt(live.in_progress || 0),
+          completedLastHour: parseInt(live.completed_last_hour || 0),
+          cancelledLastHour: parseInt(live.cancelled_last_hour || 0),
+          avgPickupWaitMin: parseFloat(live.avg_pickup_wait_min || 0),
         },
         cancellations: {
-          driverCancelsToday:  parseInt(cancel.driver_cancels_today || 0),
+          driverCancelsToday: parseInt(cancel.driver_cancels_today || 0),
           customerCancelsToday: parseInt(cancel.customer_cancels_today || 0),
-          totalToday:          parseInt(cancel.total_cancels_today || 0),
+          totalToday: parseInt(cancel.total_cancels_today || 0),
           penaltyCollectedToday: parseFloat(penalty.penalty_collected_today || 0),
         },
         quality: {
-          avgDistanceKm:       parseFloat(eta.avg_distance_km || 0),
-          avgFare:             parseFloat(eta.avg_fare || 0),
-          ghostDriverCount:    parseInt(ghost.ghost_count || 0),
+          avgDistanceKm: parseFloat(eta.avg_distance_km || 0),
+          avgFare: parseFloat(eta.avg_fare || 0),
+          ghostDriverCount: parseInt(ghost.ghost_count || 0),
         },
         surge: {
           activeSurgeZones: surgeZones,
@@ -3036,7 +3097,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const resetKey = process.env.ADMIN_RESET_KEY || process.env.OPS_API_KEY;
       const providedKey = String(req.headers["x-ops-key"] || req.body?.key || "").trim();
-      
+
       if (!resetKey || providedKey !== resetKey) {
         return res.status(403).json({ message: "Invalid or missing operations API key" });
       }
@@ -3053,7 +3114,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       console.log(`[FORCE-RESET] Forcefully resetting admin password for ${adminEmail}`);
-      
+
       // Hash the password
       const hash = await hashPassword(adminPassword);
       console.log(`[FORCE-RESET] Generated bcrypt hash: ${hash.substring(0, 30)}...`);
@@ -3310,7 +3371,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const admin = (req as any).adminUser;
       const { currentPassword, newPassword, confirmPassword } = req.body;
-      
+
       if (!currentPassword || !newPassword || !confirmPassword) {
         return res.status(400).json({ message: "Current password, new password, and confirmation are required" });
       }
@@ -3320,7 +3381,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (newPassword.length < 8) {
         return res.status(400).json({ message: "New password must be at least 8 characters" });
       }
-      
+
       // Verify current password
       const adminR = await rawDb.execute(rawSql`
         SELECT password FROM admins WHERE id=${admin.id}::uuid LIMIT 1
@@ -3328,21 +3389,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!adminR.rows.length) {
         return res.status(404).json({ message: "Admin account not found" });
       }
-      
+
       const isCurrentPasswordValid = await verifyPassword(currentPassword, (adminR.rows[0] as any).password);
       if (!isCurrentPasswordValid) {
         return res.status(401).json({ message: "Current password is incorrect" });
       }
-      
+
       // Hash new password and update
       const newHash = await hashPassword(newPassword);
       await rawDb.execute(rawSql`
         UPDATE admins SET password=${newHash} WHERE id=${admin.id}::uuid
       `);
-      
+
       // Log the change
       await logAdminAction('password_changed', 'admin_user', admin.id, { email: admin.email });
-      
+
       res.json({ success: true, message: "Password changed successfully" });
     } catch (e: any) {
       res.status(500).json({ message: safeErrMsg(e) });
@@ -3356,13 +3417,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const p = req.path;
     // Skip paths handled by their own auth mechanism or that are truly public
     if (
-      p === "/health"           ||  // public health check
-      p === "/ping"             ||  // simple test endpoint
-      p.startsWith("/diag/")    ||  // diagnostic endpoints
-      p.startsWith("/ops/")     ||  // requireOpsKey
-      p.startsWith("/app/")     ||  // mobile app routes � each has authApp
-      p.startsWith("/admin/")   ||  // global admin middleware at line 1101
-      p.startsWith("/driver/")  ||  // mobile driver routes � each has authApp
+      p === "/health" ||  // public health check
+      p === "/ping" ||  // simple test endpoint
+      p.startsWith("/diag/") ||  // diagnostic endpoints
+      p.startsWith("/ops/") ||  // requireOpsKey
+      p.startsWith("/app/") ||  // mobile app routes � each has authApp
+      p.startsWith("/admin/") ||  // global admin middleware at line 1101
+      p.startsWith("/driver/") ||  // mobile driver routes � each has authApp
       p.startsWith("/webhook")       // payment callbacks (Razorpay, etc.)
     ) return next();
     // Everything else is a legacy admin route ? require admin auth
@@ -3826,14 +3887,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(400).json({ message: "baseFare, farePerKm, minimumFare are required" });
       }
 
-      const bf   = parseFloat(String(baseFare));
-      const pkm  = parseFloat(String(farePerKm));
-      const mf   = parseFloat(String(minimumFare));
-      const wc   = parseFloat(String(waitingChargePerMin ?? 0));
-      const pm   = parseFloat(String(farePerMin));
-      const cf   = parseFloat(String(cancellationFee));
-      const ncm  = parseFloat(String(nightChargeMultiplier));
-      const hc   = parseFloat(String(helperCharge));
+      const bf = parseFloat(String(baseFare));
+      const pkm = parseFloat(String(farePerKm));
+      const mf = parseFloat(String(minimumFare));
+      const wc = parseFloat(String(waitingChargePerMin ?? 0));
+      const pm = parseFloat(String(farePerMin));
+      const cf = parseFloat(String(cancellationFee));
+      const ncm = parseFloat(String(nightChargeMultiplier));
+      const hc = parseFloat(String(helperCharge));
 
       // Update vehicle_categories primary pricing
       const updateParts: string[] = [
@@ -3843,9 +3904,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         `waiting_charge_per_min = ${wc}`,
       ];
       if (totalSeats !== undefined) updateParts.push(`total_seats = ${parseInt(String(totalSeats)) || 0}`);
-      if (isActive !== undefined)   updateParts.push(`is_active = ${isActive === true || isActive === 'true'}`);
-      if (name)  updateParts.push(`name = '${String(name).replace(/'/g, "''")}'`);
-      if (icon)  updateParts.push(`icon = '${String(icon).replace(/'/g, "''")}'`);
+      if (isActive !== undefined) updateParts.push(`is_active = ${isActive === true || isActive === 'true'}`);
+      if (name) updateParts.push(`name = '${String(name).replace(/'/g, "''")}'`);
+      if (icon) updateParts.push(`icon = '${String(icon).replace(/'/g, "''")}'`);
 
       const vcUpdated = await rawDb.execute(rawSql`
         UPDATE vehicle_categories
@@ -4006,15 +4067,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         FROM users WHERE id=${driverId}::uuid LIMIT 1
       `);
       const bal: any = balR.rows[0] || {};
-      const prevTotal      = parseFloat(bal.total_pending_balance ?? '0') || 0;
+      const prevTotal = parseFloat(bal.total_pending_balance ?? '0') || 0;
       const prevCommission = parseFloat(bal.pending_commission_balance ?? '0') || 0;
-      const prevGst        = parseFloat(bal.pending_gst_balance ?? '0') || 0;
+      const prevGst = parseFloat(bal.pending_gst_balance ?? '0') || 0;
 
-      const gstReduction  = Math.min(prevGst, parseFloat((payAmt * (prevTotal > 0 ? prevGst / prevTotal : 0.05)).toFixed(2)));
+      const gstReduction = Math.min(prevGst, parseFloat((payAmt * (prevTotal > 0 ? prevGst / prevTotal : 0.05)).toFixed(2)));
       const commReduction = Math.min(prevCommission, parseFloat((payAmt - gstReduction).toFixed(2)));
-      const newTotal      = Math.max(0, parseFloat((prevTotal - payAmt).toFixed(2)));
+      const newTotal = Math.max(0, parseFloat((prevTotal - payAmt).toFixed(2)));
       const newCommission = Math.max(0, parseFloat((prevCommission - commReduction).toFixed(2)));
-      const newGst        = Math.max(0, parseFloat((prevGst - gstReduction).toFixed(2)));
+      const newGst = Math.max(0, parseFloat((prevGst - gstReduction).toFixed(2)));
 
       await rawDb.execute(rawSql`
         UPDATE users
@@ -4200,7 +4261,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/admin/business-settings", requireAdminAuth, async (req, res) => {
     try {
       const keyName = req.body.key_name || req.body.keyName;
-      const value   = req.body.value ?? '';
+      const value = req.body.value ?? '';
       const settingsType = req.body.settingsType;
       const setting = await storage.upsertBusinessSetting(keyName, value, settingsType);
       res.json(setting);
@@ -4853,7 +4914,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/vehicle-brands", requireAdminAuth, async (req, res) => {
     try {
       const { name, logo_url, category = 'two_wheeler', is_active } = req.body;
-      const r = await rawDb.execute(rawSql`INSERT INTO vehicle_brands (name, logo_url, category, is_active) VALUES (${name}, ${logo_url||null}, ${category}, ${is_active ?? true}) RETURNING *`);
+      const r = await rawDb.execute(rawSql`INSERT INTO vehicle_brands (name, logo_url, category, is_active) VALUES (${name}, ${logo_url || null}, ${category}, ${is_active ?? true}) RETURNING *`);
       res.status(201).json(camelize(r.rows[0]));
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -4861,7 +4922,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { name, logo_url, category, is_active, isActive } = req.body;
       const active = is_active ?? isActive ?? true;
-      const r = await rawDb.execute(rawSql`UPDATE vehicle_brands SET name=${name}, logo_url=${logo_url||null}, category=${category||'two_wheeler'}, is_active=${active} WHERE id=${req.params.id}::uuid RETURNING *`);
+      const r = await rawDb.execute(rawSql`UPDATE vehicle_brands SET name=${name}, logo_url=${logo_url || null}, category=${category || 'two_wheeler'}, is_active=${active} WHERE id=${req.params.id}::uuid RETURNING *`);
       res.json(camelize(r.rows[0]));
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -5092,7 +5153,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/subscription-plans", requireAdminAuth, async (req, res) => {
     try {
       const { name, price, durationDays, features, isActive, planType, maxRides, maxParcels } = req.body;
-      const r = await rawDb.execute(rawSql`INSERT INTO subscription_plans (name, price, duration_days, features, is_active, plan_type, max_rides, max_parcels) VALUES (${name}, ${price}, ${durationDays||30}, ${features||''}, ${isActive ?? true}, ${planType||'both'}, ${maxRides||0}, ${maxParcels||0}) RETURNING *`);
+      const r = await rawDb.execute(rawSql`INSERT INTO subscription_plans (name, price, duration_days, features, is_active, plan_type, max_rides, max_parcels) VALUES (${name}, ${price}, ${durationDays || 30}, ${features || ''}, ${isActive ?? true}, ${planType || 'both'}, ${maxRides || 0}, ${maxParcels || 0}) RETURNING *`);
       res.status(201).json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -5133,9 +5194,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { fromCity, toCity, estimatedKm, baseFare, farePerKm, tollCharges, vehicleCategoryId, isActive } = req.body;
       let r;
       if (vehicleCategoryId) {
-        r = await rawDb.execute(rawSql`INSERT INTO intercity_routes (from_city, to_city, estimated_km, base_fare, fare_per_km, toll_charges, vehicle_category_id, is_active) VALUES (${fromCity}, ${toCity}, ${estimatedKm||0}, ${baseFare||0}, ${farePerKm||0}, ${tollCharges||0}, ${vehicleCategoryId}::uuid, ${isActive ?? true}) RETURNING *`);
+        r = await rawDb.execute(rawSql`INSERT INTO intercity_routes (from_city, to_city, estimated_km, base_fare, fare_per_km, toll_charges, vehicle_category_id, is_active) VALUES (${fromCity}, ${toCity}, ${estimatedKm || 0}, ${baseFare || 0}, ${farePerKm || 0}, ${tollCharges || 0}, ${vehicleCategoryId}::uuid, ${isActive ?? true}) RETURNING *`);
       } else {
-        r = await rawDb.execute(rawSql`INSERT INTO intercity_routes (from_city, to_city, estimated_km, base_fare, fare_per_km, toll_charges, is_active) VALUES (${fromCity}, ${toCity}, ${estimatedKm||0}, ${baseFare||0}, ${farePerKm||0}, ${tollCharges||0}, ${isActive ?? true}) RETURNING *`);
+        r = await rawDb.execute(rawSql`INSERT INTO intercity_routes (from_city, to_city, estimated_km, base_fare, fare_per_km, toll_charges, is_active) VALUES (${fromCity}, ${toCity}, ${estimatedKm || 0}, ${baseFare || 0}, ${farePerKm || 0}, ${tollCharges || 0}, ${isActive ?? true}) RETURNING *`);
       }
       res.status(201).json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -5145,9 +5206,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { fromCity, toCity, estimatedKm, baseFare, farePerKm, tollCharges, vehicleCategoryId, isActive } = req.body;
       let r;
       if (vehicleCategoryId) {
-        r = await rawDb.execute(rawSql`UPDATE intercity_routes SET from_city=${fromCity}, to_city=${toCity}, estimated_km=${estimatedKm||0}, base_fare=${baseFare||0}, fare_per_km=${farePerKm||0}, toll_charges=${tollCharges||0}, vehicle_category_id=${vehicleCategoryId}::uuid, is_active=${isActive} WHERE id=${req.params.id}::uuid RETURNING *`);
+        r = await rawDb.execute(rawSql`UPDATE intercity_routes SET from_city=${fromCity}, to_city=${toCity}, estimated_km=${estimatedKm || 0}, base_fare=${baseFare || 0}, fare_per_km=${farePerKm || 0}, toll_charges=${tollCharges || 0}, vehicle_category_id=${vehicleCategoryId}::uuid, is_active=${isActive} WHERE id=${req.params.id}::uuid RETURNING *`);
       } else {
-        r = await rawDb.execute(rawSql`UPDATE intercity_routes SET from_city=${fromCity}, to_city=${toCity}, estimated_km=${estimatedKm||0}, base_fare=${baseFare||0}, fare_per_km=${farePerKm||0}, toll_charges=${tollCharges||0}, vehicle_category_id=NULL, is_active=${isActive} WHERE id=${req.params.id}::uuid RETURNING *`);
+        r = await rawDb.execute(rawSql`UPDATE intercity_routes SET from_city=${fromCity}, to_city=${toCity}, estimated_km=${estimatedKm || 0}, base_fare=${baseFare || 0}, fare_per_km=${farePerKm || 0}, toll_charges=${tollCharges || 0}, vehicle_category_id=NULL, is_active=${isActive} WHERE id=${req.params.id}::uuid RETURNING *`);
       }
       res.json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -5705,8 +5766,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const settings: any = {};
       settingRows.rows.forEach((r: any) => { settings[r.key_name] = r.value; });
 
-      const gstAmt   = parseFloat(String(gstPortion)) || 0;
-      const commAmt  = Math.round((parseFloat(String(amount)) - gstAmt) * 100) / 100;
+      const gstAmt = parseFloat(String(gstPortion)) || 0;
+      const commAmt = Math.round((parseFloat(String(amount)) - gstAmt) * 100) / 100;
       const totalAmt = parseFloat(String(amount));
 
       const balR = await rawDb.execute(rawSql`
@@ -5719,10 +5780,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const driverRole = (driverCheck.rows[0] as any)?.role;
       if (!['driver', 'pilot'].includes(driverRole || '')) return res.status(400).json({ message: "Target user is not a driver" });
       const bal: any = balR.rows[0] || {};
-      const prevTotal    = parseFloat(bal.total_pending_balance ?? '0') || 0;
+      const prevTotal = parseFloat(bal.total_pending_balance ?? '0') || 0;
       const newCommission = parseFloat(((parseFloat(bal.pending_commission_balance ?? '0') || 0) + commAmt).toFixed(2));
-      const newGst        = parseFloat(((parseFloat(bal.pending_gst_balance ?? '0') || 0) + gstAmt).toFixed(2));
-      const newTotal      = parseFloat((prevTotal + totalAmt).toFixed(2));
+      const newGst = parseFloat(((parseFloat(bal.pending_gst_balance ?? '0') || 0) + gstAmt).toFixed(2));
+      const newTotal = parseFloat((prevTotal + totalAmt).toFixed(2));
 
       const updated = await rawDb.execute(rawSql`
         UPDATE users
@@ -5754,7 +5815,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { id } = req.params;
       const { lock, reason } = req.body;
       if (lock) {
-        await rawDb.execute(rawSql`UPDATE users SET is_locked=true, lock_reason=${reason||'Locked by admin'}, locked_at=NOW() WHERE id=${id}::uuid`);
+        await rawDb.execute(rawSql`UPDATE users SET is_locked=true, lock_reason=${reason || 'Locked by admin'}, locked_at=NOW() WHERE id=${id}::uuid`);
       } else {
         await rawDb.execute(rawSql`UPDATE users SET is_locked=false, lock_reason=NULL, locked_at=NULL WHERE id=${id}::uuid`);
       }
@@ -5822,9 +5883,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         FROM users WHERE id=${id}::uuid LIMIT 1
       `);
       const bal: any = balR.rows[0] || {};
-      const prevTotal      = parseFloat(bal.total_pending_balance ?? '0') || 0;
+      const prevTotal = parseFloat(bal.total_pending_balance ?? '0') || 0;
       const prevCommission = parseFloat(bal.pending_commission_balance ?? '0') || 0;
-      const prevGst        = parseFloat(bal.pending_gst_balance ?? '0') || 0;
+      const prevGst = parseFloat(bal.pending_gst_balance ?? '0') || 0;
       // Amount from DB � never trust client-sent amount
       const pendingRec = await rawDb.execute(rawSql`
         SELECT amount FROM driver_payments WHERE razorpay_order_id=${razorpayOrderId} AND driver_id=${id}::uuid AND status='pending' LIMIT 1
@@ -5846,13 +5907,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const totalPaise = Math.round(prevTotal * 100);
       const gstPaise = Math.round(prevGst * 100);
       const commPaise = Math.round(prevCommission * 100);
-      const gstRedPaise  = Math.min(gstPaise, totalPaise > 0 ? Math.round(paidPaise * gstPaise / totalPaise) : Math.round(paidPaise * 0.05));
+      const gstRedPaise = Math.min(gstPaise, totalPaise > 0 ? Math.round(paidPaise * gstPaise / totalPaise) : Math.round(paidPaise * 0.05));
       const commRedPaise = Math.min(commPaise, paidPaise - gstRedPaise);
-      const gstReduction  = gstRedPaise / 100;
+      const gstReduction = gstRedPaise / 100;
       const commReduction = commRedPaise / 100;
-      const newTotal      = Math.max(0, Math.round((totalPaise - paidPaise)) / 100);
+      const newTotal = Math.max(0, Math.round((totalPaise - paidPaise)) / 100);
       const newCommission = Math.max(0, Math.round((commPaise - commRedPaise)) / 100);
-      const newGst        = Math.max(0, Math.round((gstPaise - gstRedPaise)) / 100);
+      const newGst = Math.max(0, Math.round((gstPaise - gstRedPaise)) / 100);
 
       const updated = await rawDb.execute(rawSql`
         UPDATE users
@@ -5920,16 +5981,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         FROM users WHERE id=${id}::uuid LIMIT 1
       `);
       const bal: any = balR.rows[0] || {};
-      const prevTotal      = parseFloat(bal.total_pending_balance ?? '0') || 0;
+      const prevTotal = parseFloat(bal.total_pending_balance ?? '0') || 0;
       const prevCommission = parseFloat(bal.pending_commission_balance ?? '0') || 0;
-      const prevGst        = parseFloat(bal.pending_gst_balance ?? '0') || 0;
-      const paidAmt        = parseFloat(String(amount));
+      const prevGst = parseFloat(bal.pending_gst_balance ?? '0') || 0;
+      const paidAmt = parseFloat(String(amount));
 
-      const gstReduction  = Math.min(prevGst, paidAmt * (prevTotal > 0 ? prevGst / prevTotal : 0.05));
+      const gstReduction = Math.min(prevGst, paidAmt * (prevTotal > 0 ? prevGst / prevTotal : 0.05));
       const commReduction = Math.min(prevCommission, paidAmt - gstReduction);
-      const newTotal      = Math.max(0, parseFloat((prevTotal - paidAmt).toFixed(2)));
+      const newTotal = Math.max(0, parseFloat((prevTotal - paidAmt).toFixed(2)));
       const newCommission = Math.max(0, parseFloat((prevCommission - commReduction).toFixed(2)));
-      const newGst        = Math.max(0, parseFloat((prevGst - gstReduction).toFixed(2)));
+      const newGst = Math.max(0, parseFloat((prevGst - gstReduction).toFixed(2)));
 
       const updated = await rawDb.execute(rawSql`
         UPDATE users
@@ -5993,8 +6054,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { customerId, tripId, amount, reason, paymentMethod } = req.body;
       const r = tripId
-        ? await rawDb.execute(rawSql`INSERT INTO refund_requests (customer_id, trip_id, amount, reason, payment_method) VALUES (${customerId}::uuid, ${tripId}::uuid, ${amount}, ${reason}, ${paymentMethod||'wallet'}) RETURNING *`)
-        : await rawDb.execute(rawSql`INSERT INTO refund_requests (customer_id, amount, reason, payment_method) VALUES (${customerId}::uuid, ${amount}, ${reason}, ${paymentMethod||'wallet'}) RETURNING *`);
+        ? await rawDb.execute(rawSql`INSERT INTO refund_requests (customer_id, trip_id, amount, reason, payment_method) VALUES (${customerId}::uuid, ${tripId}::uuid, ${amount}, ${reason}, ${paymentMethod || 'wallet'}) RETURNING *`)
+        : await rawDb.execute(rawSql`INSERT INTO refund_requests (customer_id, amount, reason, payment_method) VALUES (${customerId}::uuid, ${amount}, ${reason}, ${paymentMethod || 'wallet'}) RETURNING *`);
       res.json(camelize(r.rows[0]));
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -6013,7 +6074,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         : rawSql`WHERE id=${id}::uuid AND status != 'approved'`; // can update pending/denied freely
       const r = await rawDb.execute(rawSql`
         UPDATE refund_requests
-        SET status=${status}, admin_note=${adminNote||''}, approved_by=${approvedBy||'Admin'},
+        SET status=${status}, admin_note=${adminNote || ''}, approved_by=${approvedBy || 'Admin'},
             approved_at=${status !== 'pending' ? rawSql`NOW()` : rawSql`NULL`}
         ${whereClause}
         RETURNING *
@@ -6126,7 +6187,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         : (routeKmNum * (s.rate_per_km_per_seat || 3.5));
       const r = await rawDb.execute(rawSql`
         INSERT INTO intercity_cs_rides (driver_id, from_city, to_city, route_km, departure_date, departure_time, total_seats, vehicle_number, vehicle_model, note, fare_per_seat)
-        VALUES (${driverId}::uuid, ${fromCity}, ${toCity}, ${routeKmNum}, ${departureDate}, ${departureTime}, ${totalSeats}, ${vehicleNumber||''}, ${vehicleModel||''}, ${note||''}, ${farePerSeatNum})
+        VALUES (${driverId}::uuid, ${fromCity}, ${toCity}, ${routeKmNum}, ${departureDate}, ${departureTime}, ${totalSeats}, ${vehicleNumber || ''}, ${vehicleModel || ''}, ${note || ''}, ${farePerSeatNum})
         RETURNING *
       `);
       res.json(camelize(r.rows[0]));
@@ -6470,7 +6531,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.patch("/api/admin/outstation-pool/settings", requireAdminAuth, requireAdminRole(["admin", "superadmin"]), async (req, res) => {
     try {
       const { mode } = req.body; // 'on' | 'off'
-      if (!['on','off'].includes(mode)) return res.status(400).json({ message: "mode must be 'on' or 'off'" });
+      if (!['on', 'off'].includes(mode)) return res.status(400).json({ message: "mode must be 'on' or 'off'" });
       await rawDb.execute(rawSql`
         INSERT INTO revenue_model_settings (key_name, value)
         VALUES ('outstation_pool_mode', ${mode})
@@ -6494,7 +6555,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/call-logs", async (req, res) => {
     try {
       const status = (req.query.status as string) || "all";
-      const page  = Math.max(1, Number(req.query.page)  || 1);
+      const page = Math.max(1, Number(req.query.page) || 1);
       const limit = Math.min(100, Number(req.query.limit) || 50);
       const offset = (page - 1) * limit;
 
@@ -6669,14 +6730,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/insurance-plans", requireAdminAuth, async (req, res) => {
     try {
       const { name, planType, premiumDaily, premiumMonthly, coverageAmount, features, isActive } = req.body;
-      const r = await rawDb.execute(rawSql`INSERT INTO insurance_plans (name, plan_type, premium_daily, premium_monthly, coverage_amount, features, is_active) VALUES (${name}, ${planType||'vehicle'}, ${premiumDaily||0}, ${premiumMonthly||0}, ${coverageAmount||0}, ${features||''}, ${isActive ?? true}) RETURNING *`);
+      const r = await rawDb.execute(rawSql`INSERT INTO insurance_plans (name, plan_type, premium_daily, premium_monthly, coverage_amount, features, is_active) VALUES (${name}, ${planType || 'vehicle'}, ${premiumDaily || 0}, ${premiumMonthly || 0}, ${coverageAmount || 0}, ${features || ''}, ${isActive ?? true}) RETURNING *`);
       res.status(201).json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
   app.put("/api/insurance-plans/:id", requireAdminAuth, async (req, res) => {
     try {
       const { name, planType, premiumDaily, premiumMonthly, coverageAmount, features, isActive } = req.body;
-      const r = await rawDb.execute(rawSql`UPDATE insurance_plans SET name=${name}, plan_type=${planType||'vehicle'}, premium_daily=${premiumDaily||0}, premium_monthly=${premiumMonthly||0}, coverage_amount=${coverageAmount||0}, features=${features||''}, is_active=${isActive} WHERE id=${req.params.id}::uuid RETURNING *`);
+      const r = await rawDb.execute(rawSql`UPDATE insurance_plans SET name=${name}, plan_type=${planType || 'vehicle'}, premium_daily=${premiumDaily || 0}, premium_monthly=${premiumMonthly || 0}, coverage_amount=${coverageAmount || 0}, features=${features || ''}, is_active=${isActive} WHERE id=${req.params.id}::uuid RETURNING *`);
       res.json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -6710,7 +6771,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/driver-insurance", async (req, res) => {
     try {
       const { driverId, planId, startDate, endDate, paymentAmount, paymentStatus } = req.body;
-      const r = await rawDb.execute(rawSql`INSERT INTO driver_insurance (driver_id, plan_id, start_date, end_date, payment_amount, payment_status, is_active) VALUES (${driverId}::uuid, ${planId}::uuid, ${startDate}, ${endDate}, ${paymentAmount||0}, ${paymentStatus||'paid'}, true) RETURNING *`);
+      const r = await rawDb.execute(rawSql`INSERT INTO driver_insurance (driver_id, plan_id, start_date, end_date, payment_amount, payment_status, is_active) VALUES (${driverId}::uuid, ${planId}::uuid, ${startDate}, ${endDate}, ${paymentAmount || 0}, ${paymentStatus || 'paid'}, true) RETURNING *`);
       res.status(201).json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -6732,7 +6793,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { driverId, planId, startDate, endDate, paymentAmount, paymentStatus } = req.body;
       await rawDb.execute(rawSql`UPDATE driver_subscriptions SET is_active=false WHERE driver_id=${driverId}::uuid`);
-      const r = await rawDb.execute(rawSql`INSERT INTO driver_subscriptions (driver_id, plan_id, start_date, end_date, payment_amount, payment_status, is_active) VALUES (${driverId}::uuid, ${planId}::uuid, ${startDate}, ${endDate}, ${paymentAmount||0}, ${paymentStatus||'paid'}, true) RETURNING *`);
+      const r = await rawDb.execute(rawSql`INSERT INTO driver_subscriptions (driver_id, plan_id, start_date, end_date, payment_amount, payment_status, is_active) VALUES (${driverId}::uuid, ${planId}::uuid, ${startDate}, ${endDate}, ${paymentAmount || 0}, ${paymentStatus || 'paid'}, true) RETURNING *`);
       res.status(201).json(camelize(r.rows)[0]);
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
@@ -6741,11 +6802,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/reports/earnings", async (req, res) => {
     try {
       const { from, to } = req.query;
-      const fromDate = from || new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0];
+      const fromDate = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const toDate = to || new Date().toISOString().split('T')[0];
       // Get settings for commission rates
       const settR = await rawDb.execute(rawSql`SELECT key_name, value FROM business_settings WHERE key_name IN ('platform_commission_b2c','gst_percentage','insurance_per_ride')`);
-      const sett: Record<string,string> = {};
+      const sett: Record<string, string> = {};
       settR.rows.forEach((s: any) => { sett[s.key_name] = s.value; });
       const commPct = parseFloat(sett['platform_commission_b2c'] || '15') / 100;
       const gstPct = parseFloat(sett['gst_percentage'] || '18') / 100;
@@ -6760,13 +6821,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const driverEarning = rev - commission;
         return camelize({ ...row, commission: commission.toFixed(2), gst: gst.toFixed(2), insurance: insurance.toFixed(2), admin_total: adminTotal.toFixed(2), driver_earning: driverEarning.toFixed(2) });
       });
-      res.json({ rows, summary: { totalRevenue: rows.reduce((s: any, r: any) => s + parseFloat(r.revenue||0), 0).toFixed(2), totalTrips: rows.reduce((s: any, r: any) => s + parseInt(r.trips||0), 0), totalCommission: rows.reduce((s: any, r: any) => s + parseFloat(r.commission||0), 0).toFixed(2), totalGst: rows.reduce((s: any, r: any) => s + parseFloat(r.gst||0), 0).toFixed(2), totalInsurance: rows.reduce((s: any, r: any) => s + parseFloat(r.insurance||0), 0).toFixed(2), totalAdminEarning: rows.reduce((s: any, r: any) => s + parseFloat(r.adminTotal||0), 0).toFixed(2) } });
+      res.json({ rows, summary: { totalRevenue: rows.reduce((s: any, r: any) => s + parseFloat(r.revenue || 0), 0).toFixed(2), totalTrips: rows.reduce((s: any, r: any) => s + parseInt(r.trips || 0), 0), totalCommission: rows.reduce((s: any, r: any) => s + parseFloat(r.commission || 0), 0).toFixed(2), totalGst: rows.reduce((s: any, r: any) => s + parseFloat(r.gst || 0), 0).toFixed(2), totalInsurance: rows.reduce((s: any, r: any) => s + parseFloat(r.insurance || 0), 0).toFixed(2), totalAdminEarning: rows.reduce((s: any, r: any) => s + parseFloat(r.adminTotal || 0), 0).toFixed(2) } });
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
   app.get("/api/reports/trips", async (req, res) => {
     try {
       const { from, to } = req.query;
-      const fromDate = from || new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0];
+      const fromDate = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
       const toDate = to || new Date().toISOString().split('T')[0];
       const r = await rawDb.execute(rawSql`SELECT tr.ref_id, tr.pickup_address, tr.destination_address, tr.estimated_fare, tr.actual_fare, tr.current_status, tr.payment_method, tr.trip_type, tr.created_at, u.full_name as customer_name, vc.name as vehicle_name FROM trip_requests tr LEFT JOIN users u ON u.id=tr.customer_id LEFT JOIN vehicle_categories vc ON vc.id=tr.vehicle_category_id WHERE DATE(tr.created_at) BETWEEN ${fromDate} AND ${toDate} ORDER BY tr.created_at DESC LIMIT 500`);
       res.json(camelize(r.rows));
@@ -6836,15 +6897,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (userId) {
         r = await rawDb.execute(rawSql`
           INSERT INTO safety_alerts (user_id, trip_id, alert_type, triggered_by, latitude, longitude, location_address, nearby_drivers_notified)
-          VALUES (${userId}::uuid, ${tripId ? tripId : null}, ${alertType||'sos'}, ${triggeredBy||'customer'},
-                  ${latitude||null}, ${longitude||null}, ${locationAddress||null}, ${nearbyCount})
+          VALUES (${userId}::uuid, ${tripId ? tripId : null}, ${alertType || 'sos'}, ${triggeredBy || 'customer'},
+                  ${latitude || null}, ${longitude || null}, ${locationAddress || null}, ${nearbyCount})
           RETURNING *
         `);
       } else {
         r = await rawDb.execute(rawSql`
           INSERT INTO safety_alerts (alert_type, triggered_by, latitude, longitude, location_address, nearby_drivers_notified)
-          VALUES (${alertType||'sos'}, ${triggeredBy||'customer'},
-                  ${latitude||null}, ${longitude||null}, ${locationAddress||null}, ${nearbyCount})
+          VALUES (${alertType || 'sos'}, ${triggeredBy || 'customer'},
+                  ${latitude || null}, ${longitude || null}, ${locationAddress || null}, ${nearbyCount})
           RETURNING *
         `);
       }
@@ -6856,8 +6917,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { adminName, notes } = req.body;
       const r = await rawDb.execute(rawSql`
-        UPDATE safety_alerts SET status='acknowledged', acknowledged_by_name=${adminName||'Admin'},
-        acknowledged_at=now(), notes=${notes||null} WHERE id=${req.params.id}::uuid RETURNING *
+        UPDATE safety_alerts SET status='acknowledged', acknowledged_by_name=${adminName || 'Admin'},
+        acknowledged_at=now(), notes=${notes || null} WHERE id=${req.params.id}::uuid RETURNING *
       `);
       if (!r.rows.length) return res.status(404).json({ message: "Alert not found" });
       res.json(camelize(r.rows[0]));
@@ -6869,7 +6930,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { policeNotified, notes } = req.body;
       const r = await rawDb.execute(rawSql`
         UPDATE safety_alerts SET status='resolved', resolved_at=now(),
-        police_notified=${policeNotified??false}, notes=${notes||null} WHERE id=${req.params.id}::uuid RETURNING *
+        police_notified=${policeNotified ?? false}, notes=${notes || null} WHERE id=${req.params.id}::uuid RETURNING *
       `);
       if (!r.rows.length) return res.status(404).json({ message: "Alert not found" });
       res.json(camelize(r.rows[0]));
@@ -6897,9 +6958,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!name) return res.status(400).json({ message: "Station name required" });
       let r;
       if (zoneId) {
-        r = await rawDb.execute(rawSql`INSERT INTO police_stations (name, zone_id, address, phone, latitude, longitude) VALUES (${name}, ${zoneId}::uuid, ${address||null}, ${phone||null}, ${latitude||null}, ${longitude||null}) RETURNING *`);
+        r = await rawDb.execute(rawSql`INSERT INTO police_stations (name, zone_id, address, phone, latitude, longitude) VALUES (${name}, ${zoneId}::uuid, ${address || null}, ${phone || null}, ${latitude || null}, ${longitude || null}) RETURNING *`);
       } else {
-        r = await rawDb.execute(rawSql`INSERT INTO police_stations (name, address, phone, latitude, longitude) VALUES (${name}, ${address||null}, ${phone||null}, ${latitude||null}, ${longitude||null}) RETURNING *`);
+        r = await rawDb.execute(rawSql`INSERT INTO police_stations (name, address, phone, latitude, longitude) VALUES (${name}, ${address || null}, ${phone || null}, ${latitude || null}, ${longitude || null}) RETURNING *`);
       }
       res.status(201).json(camelize(r.rows[0]));
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -6910,9 +6971,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { name, zoneId, address, phone, latitude, longitude, isActive } = req.body;
       let r;
       if (zoneId) {
-        r = await rawDb.execute(rawSql`UPDATE police_stations SET name=${name}, zone_id=${zoneId}::uuid, address=${address||null}, phone=${phone||null}, latitude=${latitude||null}, longitude=${longitude||null}, is_active=${isActive??true} WHERE id=${req.params.id}::uuid RETURNING *`);
+        r = await rawDb.execute(rawSql`UPDATE police_stations SET name=${name}, zone_id=${zoneId}::uuid, address=${address || null}, phone=${phone || null}, latitude=${latitude || null}, longitude=${longitude || null}, is_active=${isActive ?? true} WHERE id=${req.params.id}::uuid RETURNING *`);
       } else {
-        r = await rawDb.execute(rawSql`UPDATE police_stations SET name=${name}, zone_id=NULL, address=${address||null}, phone=${phone||null}, latitude=${latitude||null}, longitude=${longitude||null}, is_active=${isActive??true} WHERE id=${req.params.id}::uuid RETURNING *`);
+        r = await rawDb.execute(rawSql`UPDATE police_stations SET name=${name}, zone_id=NULL, address=${address || null}, phone=${phone || null}, latitude=${latitude || null}, longitude=${longitude || null}, is_active=${isActive ?? true} WHERE id=${req.params.id}::uuid RETURNING *`);
       }
       res.json(camelize(r.rows[0]));
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -7398,7 +7459,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               restVerified = true;
             }
           }
-        } catch (_) {}
+        } catch (_) { }
 
         // Final fallback: Firebase verified on-device — trust the phone number the app sent.
         // We no longer require a server SMS or send-otp marker for Firebase-only auth.
@@ -7408,7 +7469,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             return res.status(400).json({ message: "Phone number required for login. Please try again." });
           }
           phoneStr = clientPhone;
-          console.log(`[AUTH] Firebase REST fallback used for ${clientPhone.slice(-4).padStart(10,'*')} - Firebase Admin not configured`);
+          console.log(`[AUTH] Firebase REST fallback used for ${clientPhone.slice(-4).padStart(10, '*')} - Firebase Admin not configured`);
         }
       }
 
@@ -7502,7 +7563,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               VALUES (${(referrer.rows[0] as any).id}::uuid, ${user.id}::uuid, ${userType}, 'pending', 50)
             `).catch(dbCatch("db"));
           }
-        } catch (_) {}
+        } catch (_) { }
       }
       res.json({ success: true, isNew: true, token, user: { id: user.id, fullName: user.fullName, phone: user.phone, email: user.email || null, userType: user.userType, walletBalance: 0 } });
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -7510,6 +7571,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // -- PASSWORD-BASED LOGIN --------------------------------------------------
   app.post("/api/app/login-password", loginLimiter, async (req, res) => {
+    log(`Login request received for phone: ${req.body?.phone}`);
     try {
       const { phone, password, userType = "customer" } = req.body;
       if (!phone || !password) return res.status(400).json({ message: "Phone and password are required" });
@@ -7602,7 +7664,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
 
-    // -- AUTH MIDDLEWARE (simple token check) ---------------------------------
+  // -- AUTH MIDDLEWARE (simple token check) ---------------------------------
   async function authApp(req: Request, res: Response, next: NextFunction) {
     try {
       const token = req.headers.authorization?.replace("Bearer ", "");
@@ -7638,20 +7700,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const driver = (req as any).currentUser;
       const { lat, lng, heading = 0, speed = 0, isOnline } = req.body;
-      
+
       // -- SECURITY: Validate coordinates and numeric values --
       const coords = validateLatLng(lat, lng);
       const validHeading = safeFloat(heading, 0);
       const validSpeed = safeFloat(speed, 0);
-      
+
       // Ensure non-negative speed and heading in [0, 360]
       if (validSpeed < 0) throw new Error("Speed cannot be negative");
       if (validHeading < 0 || validHeading > 360) throw new Error("Heading must be 0-360");
-      
+
       // isOnline defaults to true � if you're sending location, you are online.
       // Fallback chain: body.isOnline ? true (never false here; going offline is via online-status endpoint)
       const effectiveOnline = isOnline !== undefined ? Boolean(isOnline) : true;
-      
+
       // Upsert location � always include updated_at=NOW() in both INSERT and ON CONFLICT
       await rawDb.execute(rawSql`
         INSERT INTO driver_locations (driver_id, lat, lng, heading, speed, is_online, updated_at)
@@ -8035,7 +8097,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       await rawDb.execute(rawSql`UPDATE users SET current_trip_id=${tripId}::uuid WHERE id=${driver.id}::uuid`);
 
       // Notify dispatch engine � clears timers and notifies other drivers
-            // Notify dispatch engine – clears timers and notifies other drivers
+      // Notify dispatch engine – clears timers and notifies other drivers
       onDriverAccepted(tripId, driver.id);
 
       const tripData = camelize(r.rows[0]) as any;
@@ -8053,7 +8115,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const driverName = driver.fullName || "Pilot";
         const driverPhone = driver.phone || "";
         const driverRating = driver.avgRating || 4.5;
-        
+
         // Notify customer with multi-channel notification
         await notifyCustomerWithDriver(
           tripData.customerId,
@@ -8063,7 +8125,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           driverPhone,
           driverRating
         );
-        
+
         // Setup timeout handlers (2-min timeout if customer doesn't start ride)
         await setupTripTimeoutHandlers(tripData.id, tripData.customerId, driver.id);
       } catch (hardeningErr: any) {
@@ -8198,19 +8260,49 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         UPDATE trip_requests SET current_status='on_the_way', ride_started_at=NOW()
         WHERE id=${tripId}::uuid RETURNING *
       `);
+      const updatedTrip = camelize(updated.rows[0]);
       await appendTripStatus(tripId, 'trip_started', 'driver', 'Pickup OTP verified');
       await logRideLifecycleEvent(tripId, 'trip_started', driver.id, 'driver', { via: 'verify-pickup-otp' });
-      // ?? For parcel � send delivery OTP to receiver via SMS when pickup is done
+
+      // ?? For parcel - send delivery OTP to receiver via SMS when pickup is done
       if ((trip.trip_type === 'parcel' || trip.trip_type === 'delivery') && trip.delivery_otp && trip.receiver_phone) {
         sendCustomSms(trip.receiver_phone,
           `JAGO Pro Parcel: Package picked up by driver ${driver.fullName || ''}. Delivery OTP: ${trip.delivery_otp}. Share this to receive your parcel.`
         ).catch(dbCatch("db"));
       }
+
       if (io) {
-        io.to(`user:${trip.customer_id}`).emit("trip:status_update", { tripId, status: "on_the_way", otp, uiState: 'trip_started' });
-        io.to(`trip:${tripId}`).emit("trip:status_update", { tripId, status: "on_the_way", otp, uiState: 'trip_started' });
+        // Fetch driver vehicle info for the broadcast
+        const vR = await rawDb.execute(rawSql`
+          SELECT dd.vehicle_number, dd.vehicle_model, vc.name as vehicle_category
+          FROM driver_details dd
+          LEFT JOIN vehicle_categories vc ON vc.id = dd.vehicle_category_id
+          WHERE dd.user_id = ${driver.id}::uuid LIMIT 1
+        `).catch(() => ({ rows: [] }));
+        const vehicle = vR.rows[0] as any || {};
+
+        const payload = {
+          tripId,
+          status: "on_the_way",
+          otp,
+          uiState: 'trip_started',
+          driver: {
+            id: driver.id,
+            fullName: driver.fullName,
+            phone: driver.phone,
+            rating: driver.rating,
+            photo: driver.profilePhoto,
+            vehicleNumber: vehicle.vehicle_number || '',
+            vehicleModel: vehicle.vehicle_model || '',
+            vehicleCategory: vehicle.vehicle_category || '',
+            lat: updatedTrip.currentLat,
+            lng: updatedTrip.currentLng
+          }
+        };
+        io.to(`user:${updatedTrip.customerId}`).emit("trip:status_update", payload);
+        io.to(`trip:${tripId}`).emit("trip:status_update", payload);
       }
-      res.json({ success: true, trip: camelize(updated.rows[0]) });
+      res.json({ success: true, trip: updatedTrip });
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
   });
 
@@ -8371,7 +8463,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const estimatedFareVal = parseFloat(tripRow.estimated_fare) || 0;
       let fare = parseFloat(actualFare) || estimatedFareVal;
       if (!fare || fare <= 0) return res.status(400).json({ message: "Fare amount is invalid" });
-      
+
       // -- HARDENING: Validate fare accuracy before capping --
       try {
         const fareValidation = await validateFareAccuracy(tripId, estimatedFareVal, fare, tripRow.customer_id);
@@ -8381,7 +8473,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } catch (hardeningErr: any) {
         log('HARDENING-COMPLETE-FARE', hardeningErr.message);
       }
-      
+
       // Cap actual fare to 1.5x estimated fare to prevent fare manipulation
       if (estimatedFareVal > 0 && fare > estimatedFareVal * 1.5) fare = Math.round(estimatedFareVal * 1.5 * 100) / 100;
       // Absolute cap at ?10,000 per ride
@@ -8397,13 +8489,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const rideFullFare = farePaise / 100;
       const userDiscountPaise = completedRidesCount < 2 ? Math.round(farePaise * 0.50) : 0;
       const userDiscount = userDiscountPaise / 100;
-      const userPayable  = (farePaise - userDiscountPaise) / 100;
+      const userPayable = (farePaise - userDiscountPaise) / 100;
 
       // -- Car Pool: per-seat fare -------------------------------------------
-      const seatsBooked   = parseInt(tripRow.seats_booked ?? '1') || 1;
-      const isCarpool     = tripRow.is_carpool === true || tripRow.is_carpool === 'true';
-      const carpoolSeats  = parseInt(tripRow.total_seats ?? '4') || 4;
-      const seatPrice     = isCarpool ? Math.round(farePaise / carpoolSeats) / 100 : 0;
+      const seatsBooked = parseInt(tripRow.seats_booked ?? '1') || 1;
+      const isCarpool = tripRow.is_carpool === true || tripRow.is_carpool === 'true';
+      const carpoolSeats = parseInt(tripRow.total_seats ?? '4') || 4;
+      const seatPrice = isCarpool ? Math.round(farePaise / carpoolSeats) / 100 : 0;
       const vehicleTypeName = tripRow.vehicle_name || tripRow.vehicle_type_field || null;
 
       // -- GST: 5% of full ride fare (government tax, always deducted from driver credit) --
@@ -8436,11 +8528,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const tripServiceType = (tripRow.trip_type || tripRow.type || 'normal');
       const serviceCategory: any =
         tripServiceType === 'parcel' ? 'parcel'
-        : tripServiceType === 'cargo' ? 'cargo'
-        : tripServiceType === 'intercity' ? 'intercity'
-        : (tripServiceType === 'city_pool' || tripServiceType === 'carpool') ? 'city_pool'
-        : tripServiceType === 'outstation_pool' ? 'outstation_pool'
-        : 'rides';
+          : tripServiceType === 'cargo' ? 'cargo'
+            : tripServiceType === 'intercity' ? 'intercity'
+              : (tripServiceType === 'city_pool' || tripServiceType === 'carpool') ? 'city_pool'
+                : tripServiceType === 'outstation_pool' ? 'outstation_pool'
+                  : 'rides';
 
       const breakdown = await calculateRevenueBreakdown(fare, serviceCategory, driver.id);
       const deductAmount = breakdown.total;
@@ -8464,7 +8556,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         try {
           const cwRes = await rawDb.execute(rawSql`SELECT wallet_balance FROM users WHERE id=${tripRow.customer_id}::uuid`);
           customerWalletBalance = parseFloat((cwRes.rows[0] as any)?.wallet_balance || '0');
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // Settle: driver wallet, commission_settlements, GST wallet, admin_revenue, auto-lock
@@ -8547,7 +8639,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             walletPendingAmount = userPayable;
             console.log(`[WALLET] ??  No balance: full ?${userPayable} pending (cash/UPI) � customer ${tripCustomerId}`);
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // Record transaction for online/razorpay payments
@@ -8583,13 +8675,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       await appendTripStatus(tripId, 'trip_completed', 'driver', 'Trip completed by driver');
       await logRideLifecycleEvent(tripId, 'trip_completed', driver.id, 'driver', { fare, actualDistance });
 
-      // ?? Socket: notify customer � enriched with discount/GST breakdown + wallet status
+      // ?? Socket: notify customer ? enriched with discount/GST breakdown + wallet status
       if (io && completedTrip.customerId) {
-        io.to(`user:${completedTrip.customerId}`).emit("trip:status_update", {
+        const socketPayload = {
           tripId,
           status: "completed",
           currentStatus: "completed",
           fare: rideFullFare,
+          actualFare: userPayable,
           userDiscount,
           userPayable,
           gstAmount,
@@ -8602,62 +8695,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           walletPaidAmount,
           walletPendingAmount,
           requiresCashPayment: walletPendingAmount > 0,
-        });
-        io.to(`trip:${tripId}`).emit("trip:status_update", {
-          tripId,
-          status: "completed",
-          currentStatus: "completed",
-          fare: rideFullFare,
-          userDiscount,
-          userPayable,
-          gstAmount,
-          driverWalletCredit,
-          actualDistance: parseFloat(actualDistance) || parseFloat((tripRow as any).estimated_distance) || 0,
-          paymentMethod: tripRow.payment_method || 'cash',
-          platformDeduction: deductAmount,
-          launchOfferApplied: userDiscount > 0,
-          uiState: 'trip_completed',
-          walletPaidAmount,
-          walletPendingAmount,
-          requiresCashPayment: walletPendingAmount > 0,
-        });
-        io.to(`user:${completedTrip.customerId}`).emit("trip:completed", {
-          tripId,
-          status: "completed",
-          currentStatus: "completed",
-          fare: rideFullFare,
-          userDiscount,
-          userPayable,
-          gstAmount,
-          driverWalletCredit,
-          actualDistance: parseFloat(actualDistance) || parseFloat((tripRow as any).estimated_distance) || 0,
-          paymentMethod: tripRow.payment_method || 'cash',
-          platformDeduction: deductAmount,
-          launchOfferApplied: userDiscount > 0,
-          uiState: 'trip_completed',
-          // Wallet partial/insufficient info � app shows "Pay remaining by cash/UPI" when pendingAmount > 0
-          walletPaidAmount,
-          walletPendingAmount,
-          requiresCashPayment: walletPendingAmount > 0,
-        });
-        io.to(`trip:${tripId}`).emit("trip:completed", {
-          tripId,
-          status: "completed",
-          currentStatus: "completed",
-          fare: rideFullFare,
-          userDiscount,
-          userPayable,
-          gstAmount,
-          driverWalletCredit,
-          actualDistance: parseFloat(actualDistance) || parseFloat((tripRow as any).estimated_distance) || 0,
-          paymentMethod: tripRow.payment_method || 'cash',
-          platformDeduction: deductAmount,
-          launchOfferApplied: userDiscount > 0,
-          uiState: 'trip_completed',
-          walletPaidAmount,
-          walletPendingAmount,
-          requiresCashPayment: walletPendingAmount > 0,
-        });
+        };
+        // Emit to status_update for TrackingScreen
+        io.to(`user:${completedTrip.customerId}`).emit("trip:status_update", socketPayload);
+        io.to(`trip:${tripId}`).emit("trip:status_update", socketPayload);
+
+        // Also emit to specific completed event if needed
+        io.to(`user:${completedTrip.customerId}`).emit("trip:completed", socketPayload);
+        io.to(`trip:${tripId}`).emit("trip:completed", socketPayload);
       }
 
       // ?? FCM: notify customer
@@ -8735,7 +8780,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         await rawDb.execute(rawSql`
           UPDATE trip_requests SET cancelled_by='driver' WHERE id=${tripId}::uuid
         `).catch(dbCatch("db"));
-      } catch (_) {}
+      } catch (_) { }
       clearTripWaypoints(tripId);
 
       // Notify customer � driver cancelled, now searching again
@@ -8821,7 +8866,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       `);
       if (!tripR.rows.length) return res.status(404).json({ message: "Completed trip not found" });
       const customerId = (tripR.rows[0] as any).customer_id;
-      await rawDb.execute(rawSql`UPDATE trip_requests SET customer_rating=${parsedRating}, driver_note=${note||''} WHERE id=${tripId}::uuid AND driver_id=${driver.id}::uuid`);
+      await rawDb.execute(rawSql`UPDATE trip_requests SET customer_rating=${parsedRating}, driver_note=${note || ''} WHERE id=${tripId}::uuid AND driver_id=${driver.id}::uuid`);
       // Update customer rating average
       await rawDb.execute(rawSql`
         UPDATE users SET
@@ -8906,9 +8951,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       `);
       const row: any = r.rows[0] || {};
       const pendingCommission = parseFloat(row.pending_commission_balance ?? '0');
-      const pendingGst        = parseFloat(row.pending_gst_balance ?? '0');
-      const totalPending      = parseFloat(row.total_pending_balance ?? '0');
-      const lockThreshold     = parseFloat(row.lock_threshold ?? '200');
+      const pendingGst = parseFloat(row.pending_gst_balance ?? '0');
+      const totalPending = parseFloat(row.total_pending_balance ?? '0');
+      const lockThreshold = parseFloat(row.lock_threshold ?? '200');
       const recent = await rawDb.execute(rawSql`
         SELECT settlement_type, total_amount, direction, balance_before, balance_after,
                payment_method, status, description, created_at
@@ -8993,14 +9038,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         FROM users WHERE id=${driver.id}::uuid LIMIT 1
       `);
       const bal: any = balR.rows[0] || {};
-      const prevTotal      = parseFloat(bal.total_pending_balance ?? '0') || 0;
+      const prevTotal = parseFloat(bal.total_pending_balance ?? '0') || 0;
       const prevCommission = parseFloat(bal.pending_commission_balance ?? '0') || 0;
-      const prevGst        = parseFloat(bal.pending_gst_balance ?? '0') || 0;
-      const gstReduction   = Math.min(prevGst, parseFloat((paidAmt * (prevTotal > 0 ? prevGst / prevTotal : 0.05)).toFixed(2)));
-      const commReduction  = Math.min(prevCommission, parseFloat((paidAmt - gstReduction).toFixed(2)));
-      const newTotal       = Math.max(0, parseFloat((prevTotal - paidAmt).toFixed(2)));
-      const newCommission  = Math.max(0, parseFloat((prevCommission - commReduction).toFixed(2)));
-      const newGst         = Math.max(0, parseFloat((prevGst - gstReduction).toFixed(2)));
+      const prevGst = parseFloat(bal.pending_gst_balance ?? '0') || 0;
+      const gstReduction = Math.min(prevGst, parseFloat((paidAmt * (prevTotal > 0 ? prevGst / prevTotal : 0.05)).toFixed(2)));
+      const commReduction = Math.min(prevCommission, parseFloat((paidAmt - gstReduction).toFixed(2)));
+      const newTotal = Math.max(0, parseFloat((prevTotal - paidAmt).toFixed(2)));
+      const newCommission = Math.max(0, parseFloat((prevCommission - commReduction).toFixed(2)));
+      const newGst = Math.max(0, parseFloat((prevGst - gstReduction).toFixed(2)));
 
       const updated = await rawDb.execute(rawSql`
         UPDATE users
@@ -9031,7 +9076,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       `).catch(dbCatch("db"));
       await rawDb.execute(rawSql`
         UPDATE driver_payments SET status='completed', razorpay_payment_id=${razorpayPaymentId},
-          razorpay_signature=${razorpaySignature||''}, verified_at=NOW()
+          razorpay_signature=${razorpaySignature || ''}, verified_at=NOW()
         WHERE razorpay_order_id=${razorpayOrderId}
       `).catch(dbCatch("db"));
       res.json({
@@ -9409,13 +9454,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // Online payment � used to link customer_payments ? trip for refund on cancel
         razorpayPaymentId
       } = req.body;
-      
+
       // -- SECURITY: Validate pickup and destination coordinates --
       const validPickupCoords = validateLatLng(pickupLat, pickupLng);
       const destLat_temp = destinationLat || destLat || 0;
       const destLng_temp = destinationLng || destLng || 0;
       const validDestCoords = validateLatLng(destLat_temp, destLng_temp);
-      
+
       const finalDestAddress = destinationAddress || destAddress || "";
       const finalPickupShort = pickupShortName || shortLocationName(pickupAddress);
       const finalDestShort = destinationShortName || shortLocationName(finalDestAddress);
@@ -9452,11 +9497,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           `);
           if (fareConfig.rows.length) {
             const fc = fareConfig.rows[0] as any;
-            const base   = parseFloat(fc.base_fare   || "0");
-            const perKm  = parseFloat(fc.fare_per_km || "0");
+            const base = parseFloat(fc.base_fare || "0");
+            const perKm = parseFloat(fc.fare_per_km || "0");
             const perMin = parseFloat(fc.fare_per_min || "0");
             const minFare = parseFloat(fc.minimum_fare || "0");
-            const dist  = Number(finalDistance) || 0;
+            const dist = Number(finalDistance) || 0;
             // Apply night charge multiplier between 22:00-06:00
             const hr = new Date().getHours();
             const isNight = hr >= 22 || hr < 6;
@@ -9469,7 +9514,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                   ? (await rawDb.execute(rawSql`SELECT surge_factor FROM zones WHERE id=${detectedZoneId}::uuid AND surge_factor > 1 LIMIT 1`)).rows[0] as any
                   : null;
                 if (surgeZoneRow?.surge_factor) surgeMult = parseFloat(surgeZoneRow.surge_factor) || 1.0;
-              } catch {}
+              } catch { }
             }
             // Also check time-based surge pricing (zone-specific + global)
             try {
@@ -9487,7 +9532,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 const timeSurge = parseFloat((activeSurge.rows[0] as any).multiplier || '1');
                 surgeMult = Math.max(surgeMult, timeSurge);
               }
-            } catch {}
+            } catch { }
             const raw = (base + perKm * dist + perMin * 0) * nightMult * surgeMult;
             computedFare = Math.max(raw, minFare);
           } else {
@@ -9551,7 +9596,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
       // Also accept pre-validated discount from Flutter (as fallback)
       if (discountAmount === 0 && promoDiscount && Number(promoDiscount) > 0) {
@@ -9587,7 +9632,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // For parcel trips, generate delivery OTP now
       const deliveryOtpVal = (tripType === 'parcel' || tripType === 'delivery') ? Math.floor(1000 + Math.random() * 9000).toString() : null;
 
-            // -- HARDENING: Pre-booking validations --
+      // -- HARDENING: Pre-booking validations --
       try {
         // Check rate limit (max 20 bookings/hour per customer)
         const rateCheck = await checkBookingRateLimit(customer.id, 20);
@@ -9604,10 +9649,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // Check customer bans or locks
         const banCheck = await checkCustomerBans(customer.id);
         if (banCheck.banned) {
-          return res.status(403).json({ 
-            error: banCheck.reason, 
+          return res.status(403).json({
+            error: banCheck.reason,
             code: "CUSTOMER_BANNED",
-            banUntil: banCheck.until 
+            banUntil: banCheck.until
           });
         }
       } catch (hardeningErr: any) {
@@ -9615,7 +9660,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         log('HARDENING-BOOKING-VALIDATION', hardeningErr.message);
       }
 
-      
+
       // Always start as 'searching' � driver must ACCEPT before being assigned
       const trip = await rawDb.execute(rawSql`
         INSERT INTO trip_requests (
@@ -9689,7 +9734,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         Number(pickupLat), Number(pickupLng),
         (tripType === 'parcel' || tripType === 'delivery') ? 'parcel'
           : (tripType === 'carpool' || tripType === 'pool') ? 'pool'
-          : (tripType === 'cargo') ? 'cargo' : 'ride'
+            : (tripType === 'cargo') ? 'cargo' : 'ride'
       );
 
       // -- Smart Dispatch Engine ----------------------------------------------
@@ -9838,7 +9883,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (trip.estimatedDistance) trip.estimatedDistance = Math.round(parseFloat(trip.estimatedDistance) * 10) / 10;
       if (trip.actualDistance) trip.actualDistance = Math.round(parseFloat(trip.actualDistance) * 10) / 10;
       // Show pickup OTP to customer when driver arrived (share with driver to start ride)
-      const showPickupOtp = ['driver_assigned','accepted','arrived'].includes(trip.currentStatus);
+      const showPickupOtp = ['driver_assigned', 'accepted', 'arrived'].includes(trip.currentStatus);
       if (!showPickupOtp) delete trip.pickupOtp;
       // For parcel: show delivery OTP to customer (sender shares with receiver)
       // Only show delivery_otp when trip is 'on_the_way' or later
@@ -9907,7 +9952,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const existingTrip = existingTripR.rows[0] as any;
       const previousStatus = String(existingTrip.current_status || "");
       const r = await rawDb.execute(rawSql`
-        UPDATE trip_requests SET current_status='cancelled', cancelled_by='customer', cancel_reason=${reason||'Customer cancelled'}
+        UPDATE trip_requests SET current_status='cancelled', cancelled_by='customer', cancel_reason=${reason || 'Customer cancelled'}
         WHERE id=${effectiveTripId}::uuid AND customer_id=${customer.id}::uuid AND current_status NOT IN ('completed','cancelled','on_the_way')
         RETURNING *
       `);
@@ -10040,38 +10085,38 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { id: tripId } = req.params;
       const { boostPercentage } = req.body;
       const customerId = (req as any).currentUser.id;
-      
+
       // Validate boost percentage (10-50%)
       if (!boostPercentage || boostPercentage < 0.1 || boostPercentage > 0.5) {
         return res.status(400).json({ error: 'Boost must be 10-50%' });
       }
-      
+
       // Verify customer owns this trip
       const tripCheck = await rawDb.execute(rawSql`
         SELECT id, estimated_fare, pickup_lat, pickup_lng, current_status
         FROM trip_requests 
         WHERE id = ${tripId}::uuid AND customer_id = ${customerId}::uuid
       `);
-      
+
       if (!tripCheck.rows.length) {
         return res.status(404).json({ error: 'Trip not found' });
       }
-      
+
       const trip = camelize(tripCheck.rows[0] as any);
-      
+
       // Only allow boost if still searching (no driver assigned yet)
       if (trip.current_status !== 'searching') {
         return res.status(400).json({ error: 'Cannot boost - trip already assigned or completed' });
       }
-      
+
       // -- HARDENING: Apply boost fare --
       try {
         const result = await boostrFareOffer(tripId as string, customerId, boostPercentage);
-        
+
         if (!result.success) {
           return res.status(400).json({ error: result.error });
         }
-        
+
         // Notify nearby drivers of boosted fare
         if (io) {
           io.to(`drivers_search:${trip.pickup_lat}:${trip.pickup_lng}`).emit('trip:fare_updated', {
@@ -10080,7 +10125,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             boostPercentage: boostPercentage * 100,
           });
         }
-        
+
         return res.json({
           success: true,
           newFare: result.newFare,
@@ -10123,7 +10168,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // Also insert into reviews table
         await rawDb.execute(rawSql`
           INSERT INTO reviews (trip_id, reviewer_id, reviewee_id, rating, comment, review_type)
-          VALUES (${tripId}::uuid, ${customer.id}::uuid, ${driverId}::uuid, ${parsedRating}, ${review||''}, 'customer_to_driver')
+          VALUES (${tripId}::uuid, ${customer.id}::uuid, ${driverId}::uuid, ${parsedRating}, ${review || ''}, 'customer_to_driver')
           ON CONFLICT DO NOTHING
         `).catch(dbCatch("db"));
       }
@@ -10177,14 +10222,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const t = camelize(r.rows[0]) as any;
 
       const fare = parseFloat(t.actualFare || t.estimatedFare || 0);
-      const gst  = parseFloat(t.gstAmount || (fare * 0.05).toFixed(2));
+      const gst = parseFloat(t.gstAmount || (fare * 0.05).toFixed(2));
       const dist = parseFloat(t.actualDistance || t.estimatedDistance || 0);
       const payable = parseFloat(t.customerFare || fare);
       const discount = parseFloat(t.discountAmount || 0);
 
       // Build receipt number: REC-<date>-<shortId>
-      const dateStr = new Date(t.completedAt || t.createdAt).toISOString().slice(0,10).replace(/-/g,'');
-      const receiptNo = `REC-${dateStr}-${(t.refId || t.id?.slice(0,8) || '').toUpperCase()}`;
+      const dateStr = new Date(t.completedAt || t.createdAt).toISOString().slice(0, 10).replace(/-/g, '');
+      const receiptNo = `REC-${dateStr}-${(t.refId || t.id?.slice(0, 8) || '').toUpperCase()}`;
 
       const receipt = {
         receiptNo,
@@ -10253,13 +10298,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const t = camelize(r.rows[0]) as any;
 
       const fare = parseFloat(t.actualFare || t.estimatedFare || 0);
-      const gst  = parseFloat(t.gstAmount || (fare * 0.05).toFixed(2));
+      const gst = parseFloat(t.gstAmount || (fare * 0.05).toFixed(2));
       const commission = parseFloat(t.commissionAmount || 0);
       const driverCredit = parseFloat(t.driverWalletCredit || t.driverFare || (fare - commission).toFixed(2));
       const dist = parseFloat(t.actualDistance || t.estimatedDistance || 0);
 
-      const dateStr = new Date(t.completedAt || t.createdAt).toISOString().slice(0,10).replace(/-/g,'');
-      const receiptNo = `REC-${dateStr}-${(t.refId || t.id?.slice(0,8) || '').toUpperCase()}`;
+      const dateStr = new Date(t.completedAt || t.createdAt).toISOString().slice(0, 10).replace(/-/g, '');
+      const receiptNo = `REC-${dateStr}-${(t.refId || t.id?.slice(0, 8) || '').toUpperCase()}`;
 
       const receipt = {
         receiptNo,
@@ -10306,9 +10351,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (dist === 0 && pickupLat && pickupLng && destLat && destLng) {
         const R = 6371;
         const lat1 = parseFloat(pickupLat) * Math.PI / 180;
-        const lat2 = parseFloat(destLat)   * Math.PI / 180;
-        const dLat = (parseFloat(destLat)  - parseFloat(pickupLat)) * Math.PI / 180;
-        const dLng = (parseFloat(destLng)  - parseFloat(pickupLng)) * Math.PI / 180;
+        const lat2 = parseFloat(destLat) * Math.PI / 180;
+        const dLat = (parseFloat(destLat) - parseFloat(pickupLat)) * Math.PI / 180;
+        const dLng = (parseFloat(destLng) - parseFloat(pickupLng)) * Math.PI / 180;
         const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
         dist = parseFloat((R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 1.3).toFixed(2));
       }
@@ -10333,7 +10378,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               activeZoneName = (zr.rows[0] as any).name || '';
             }
           }
-        } catch {}
+        } catch { }
       }
 
       // DISTINCT ON ensures exactly one row per vehicle category, avoiding zone duplicates
@@ -10357,36 +10402,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const fares = camelize(fareR.rows).map((f: any) => {
         // Resolve vehicle name for smart defaults
         const vn = (f.vehicleName || '').toLowerCase();
-        const isSuv    = vn.includes('suv');
-        const isSedan  = !isSuv && (vn.includes('sedan') || (vn.includes('car') && !vn.includes('mini') && !vn.includes('pool') && !vn.includes('share')));
-        const isMini   = vn.includes('mini');
-        const isPool   = vn.includes('pool') || vn.includes('share');
-        const isAuto   = !isSuv && !isSedan && !isMini && !isPool && vn.includes('auto');
-        const isCargo  = vn.includes('cargo');
+        const isSuv = vn.includes('suv');
+        const isSedan = !isSuv && (vn.includes('sedan') || (vn.includes('car') && !vn.includes('mini') && !vn.includes('pool') && !vn.includes('share')));
+        const isMini = vn.includes('mini');
+        const isPool = vn.includes('pool') || vn.includes('share');
+        const isAuto = !isSuv && !isSedan && !isMini && !isPool && vn.includes('auto');
+        const isCargo = vn.includes('cargo');
         const isParcel = !isCargo && vn.includes('parcel');
 
         // Smart defaults by vehicle type
-        const defaultBase  = isSuv ? 100 : isSedan ? 80 : isMini ? 60 : isPool ? 80 : isAuto ? 40 : isCargo ? 80 : isParcel ? 35 : 30;
-        const defaultPerKm = isSuv ? 22  : isSedan ? 18 : isMini ? 16 : isPool ? 15 : isAuto ? 15 : isCargo ? 20 : isParcel ? 13 : 12;
-        const defaultMin   = isSuv ? 150 : isSedan ? 120 : isMini ? 80 : isPool ? 100 : isAuto ? 60 : isCargo ? 100 : isParcel ? 40 : 40;
-        const defaultWait  = isSuv ? 3 : (isSedan || isMini || isPool || isAuto) ? 2 : 1;
+        const defaultBase = isSuv ? 100 : isSedan ? 80 : isMini ? 60 : isPool ? 80 : isAuto ? 40 : isCargo ? 80 : isParcel ? 35 : 30;
+        const defaultPerKm = isSuv ? 22 : isSedan ? 18 : isMini ? 16 : isPool ? 15 : isAuto ? 15 : isCargo ? 20 : isParcel ? 13 : 12;
+        const defaultMin = isSuv ? 150 : isSedan ? 120 : isMini ? 80 : isPool ? 100 : isAuto ? 60 : isCargo ? 100 : isParcel ? 40 : 40;
+        const defaultWait = isSuv ? 3 : (isSedan || isMini || isPool || isAuto) ? 2 : 1;
 
         // vehicle_categories pricing takes precedence over trip_fares (trip_fares is zone-specific override)
-        const base           = parseFloat(f.vcBaseFare)           || parseFloat(f.baseFare)           || defaultBase;
-        const perKm          = parseFloat(f.vcFarePerKm)          || parseFloat(f.farePerKm)          || defaultPerKm;
-        const perMin         = parseFloat(f.farePerMin)           || 0;
-        const minFare        = parseFloat(f.vcMinimumFare)        || parseFloat(f.minimumFare)        || defaultMin;
-        const waitPerMin     = parseFloat(f.vcWaitingCharge)      || parseFloat(f.waitingChargePerMin) || defaultWait;
+        const base = parseFloat(f.vcBaseFare) || parseFloat(f.baseFare) || defaultBase;
+        const perKm = parseFloat(f.vcFarePerKm) || parseFloat(f.farePerKm) || defaultPerKm;
+        const perMin = parseFloat(f.farePerMin) || 0;
+        const minFare = parseFloat(f.vcMinimumFare) || parseFloat(f.minimumFare) || defaultMin;
+        const waitPerMin = parseFloat(f.vcWaitingCharge) || parseFloat(f.waitingChargePerMin) || defaultWait;
         const nightMultiplier = parseFloat(f.nightChargeMultiplier) || 1.25;
-        const cancelFee      = parseFloat(f.cancellationFee)    || 10;
-        const helperCharge   = parseFloat(f.helperCharge)       || 0;
-        const isCarpool      = f.vcIsCarpool === true || f.vcIsCarpool === 'true';
-        const totalSeats     = parseInt(f.vcTotalSeats) || 4;
+        const cancelFee = parseFloat(f.cancellationFee) || 10;
+        const helperCharge = parseFloat(f.helperCharge) || 0;
+        const isCarpool = f.vcIsCarpool === true || f.vcIsCarpool === 'true';
+        const totalSeats = parseInt(f.vcTotalSeats) || 4;
 
         // Formula: fullFare = base_fare + (distanceKm � fare_per_km), floored at minimum_fare
-        const billableKm   = dist;
+        const billableKm = dist;
         const distanceFare = +(billableKm * perKm).toFixed(2);
-        const timeFare     = +(dur * perMin).toFixed(2);
+        const timeFare = +(dur * perMin).toFixed(2);
 
         let subtotal = base + distanceFare + timeFare;
         if (isNight) subtotal = +(subtotal * nightMultiplier).toFixed(2);
@@ -10495,8 +10540,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const R = 6371;
         const dLat2 = (dLat - oLat) * Math.PI / 180;
         const dLng2 = (dLng - oLng) * Math.PI / 180;
-        const a = Math.sin(dLat2/2) ** 2 + Math.cos(oLat * Math.PI/180) * Math.cos(dLat * Math.PI/180) * Math.sin(dLng2/2) ** 2;
-        distanceKm = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 10) / 10;
+        const a = Math.sin(dLat2 / 2) ** 2 + Math.cos(oLat * Math.PI / 180) * Math.cos(dLat * Math.PI / 180) * Math.sin(dLng2 / 2) ** 2;
+        distanceKm = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
         etaMinutes = Math.ceil(distanceKm / 20 * 60); // 20 km/h average
       }
 
@@ -10512,7 +10557,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { pickupLat, pickupLng, destLat, destLng, weightKg = 0, helpers = 0, helperHours = 1 } = req.body;
 
       const pLat = Number(pickupLat), pLng = Number(pickupLng);
-      const dLat = Number(destLat),  dLng = Number(destLng);
+      const dLat = Number(destLat), dLng = Number(destLng);
 
       // Haversine distance
       let distKm = 0;
@@ -10571,25 +10616,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const globalHelperRate = parseFloat(pf.helper_charge_per_hour || '0');
       const globalMaxHelpers = parseInt(pf.max_helpers || '0') || 5;
       // Zone-specific overrides for base/perKm rates (if configured in parcel_fares)
-      const zoneBaseFare  = pf.base_fare  ? parseFloat(pf.base_fare)  : null;
-      const zonePerKm     = pf.fare_per_km ? parseFloat(pf.fare_per_km) : null;
-      const zonePerKg     = pf.fare_per_kg ? parseFloat(pf.fare_per_kg) : null;
-      const zoneMinFare   = pf.minimum_fare ? parseFloat(pf.minimum_fare) : null;
+      const zoneBaseFare = pf.base_fare ? parseFloat(pf.base_fare) : null;
+      const zonePerKm = pf.fare_per_km ? parseFloat(pf.fare_per_km) : null;
+      const zonePerKg = pf.fare_per_kg ? parseFloat(pf.fare_per_kg) : null;
+      const zoneMinFare = pf.minimum_fare ? parseFloat(pf.minimum_fare) : null;
 
       const fares = (vcRes.rows as any[]).map(vc => {
         // Use zone-specific parcel_fares rates when configured, else vehicle_categories defaults
-        const baseFare   = zoneBaseFare  ?? parseFloat(vc.base_fare   || 0);
-        const perKm      = zonePerKm     ?? parseFloat(vc.fare_per_km || 0);
-        const minFare    = zoneMinFare   ?? parseFloat(vc.minimum_fare || 0);
-        const weightRate = zonePerKg     ?? parseFloat(vc.weight_rate  || 0);
+        const baseFare = zoneBaseFare ?? parseFloat(vc.base_fare || 0);
+        const perKm = zonePerKm ?? parseFloat(vc.fare_per_km || 0);
+        const minFare = zoneMinFare ?? parseFloat(vc.minimum_fare || 0);
+        const weightRate = zonePerKg ?? parseFloat(vc.weight_rate || 0);
 
         const rawFare = baseFare + (distKm * perKm) + (wt * weightRate);
         const loadCharge = globalLoadCharge;
         const effectiveHelpers = Math.min(helperCount, globalMaxHelpers);
         const helperCharge = effectiveHelpers * globalHelperRate * hHours;
         const customerFare = Math.ceil(Math.max(rawFare + loadCharge + helperCharge, minFare));
-        const gstAmount    = Math.ceil(customerFare * gstRate);
-        const grandTotal   = customerFare + gstAmount;
+        const gstAmount = Math.ceil(customerFare * gstRate);
+        const grandTotal = customerFare + gstAmount;
 
         // driverFare = what driver earns after platform deduction
         let platformFee = 0;
@@ -10764,8 +10809,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { fcmToken, deviceType = "android", appVersion } = req.body;
       await rawDb.execute(rawSql`
         INSERT INTO user_devices (user_id, fcm_token, device_type, app_version)
-        VALUES (${user.id}::uuid, ${fcmToken}, ${deviceType}, ${appVersion||''})
-        ON CONFLICT (user_id) DO UPDATE SET fcm_token=${fcmToken}, device_type=${deviceType}, app_version=${appVersion||''}, updated_at=NOW()
+        VALUES (${user.id}::uuid, ${fcmToken}, ${deviceType}, ${appVersion || ''})
+        ON CONFLICT (user_id) DO UPDATE SET fcm_token=${fcmToken}, device_type=${deviceType}, app_version=${appVersion || ''}, updated_at=NOW()
       `);
       res.json({ success: true });
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -11033,9 +11078,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // -- Async event processor (runs after 200 is sent) -------------------------
   const _processRazorpayEvent = async (eventId: string, eventType: string, event: any): Promise<void> => {
     const tag = `[WEBHOOK:${eventType}]`;
-    const payEnt  = event?.payload?.payment?.entity;
-    const subEnt  = event?.payload?.subscription?.entity;
-    const refEnt  = event?.payload?.refund?.entity;
+    const payEnt = event?.payload?.payment?.entity;
+    const subEnt = event?.payload?.subscription?.entity;
+    const refEnt = event?.payload?.refund?.entity;
 
     try {
       switch (eventType) {
@@ -11045,9 +11090,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         case "payment.captured": {
           if (!payEnt) { console.warn(`${tag} missing payment entity`); break; }
 
-          const orderId   = String(payEnt.order_id  ?? "");
-          const paymentId = String(payEnt.id        ?? "");
-          const amount    = (payEnt.amount ?? 0) / 100; // paise ? rupees
+          const orderId = String(payEnt.order_id ?? "");
+          const paymentId = String(payEnt.id ?? "");
+          const amount = (payEnt.amount ?? 0) / 100; // paise ? rupees
 
           console.info(`${tag} orderId=${orderId} paymentId=${paymentId} ?${amount}`);
 
@@ -11061,9 +11106,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 const Razorpay = _require("razorpay");
                 const rzp = new Razorpay({ key_id: rzpKeyId, key_secret: rzpKeySecret, timeout: 15000 });
                 const fetched = await rzp.payments.fetch(paymentId);
-                const fetchedStatus  = String(fetched.status ?? "");
+                const fetchedStatus = String(fetched.status ?? "");
                 const fetchedOrderId = String(fetched.order_id ?? "");
-                const fetchedAmount  = (fetched.amount ?? 0) / 100;
+                const fetchedAmount = (fetched.amount ?? 0) / 100;
                 if (fetchedStatus !== "captured") {
                   console.error(`${tag} API verification FAILED: status=${fetchedStatus} expected=captured`);
                   await rawDb.execute(rawSql`
@@ -11122,9 +11167,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                     SELECT * FROM subscription_plans WHERE id = ${rec.planId ?? ""}::uuid LIMIT 1
                   `).catch(() => ({ rows: [] as any[] }));
                   const plan = planRows.rows.length ? camelize(planRows.rows[0]) as any : null;
-                  const days   = plan?.durationDays ?? 30;
-                  const start  = new Date().toISOString().split("T")[0];
-                  const end    = new Date(Date.now() + days * 86_400_000).toISOString().split("T")[0];
+                  const days = plan?.durationDays ?? 30;
+                  const start = new Date().toISOString().split("T")[0];
+                  const end = new Date(Date.now() + days * 86_400_000).toISOString().split("T")[0];
 
                   await rawDb.execute(rawSql`
                     UPDATE driver_subscriptions
@@ -11262,7 +11307,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // -- payment.failed -------------------------------------------------
         case "payment.failed": {
           if (!payEnt) { console.warn(`${tag} missing payment entity`); break; }
-          const orderId    = String(payEnt.order_id ?? "");
+          const orderId = String(payEnt.order_id ?? "");
           const failReason = String(
             payEnt.error_description ?? payEnt.error_reason ?? "Payment failed"
           ).slice(0, 500);
@@ -11294,12 +11339,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         case "subscription.activated":
         case "subscription.charged": {
           if (!subEnt) { console.warn(`${tag} missing subscription entity`); break; }
-          const rzpSubId  = String(subEnt.id ?? "");
-          const driverId  = String(subEnt.notes?.driver_id ?? "");
+          const rzpSubId = String(subEnt.id ?? "");
+          const driverId = String(subEnt.notes?.driver_id ?? "");
           const cycleStart = subEnt.current_start
             ? new Date(subEnt.current_start * 1000).toISOString().split("T")[0]
             : new Date().toISOString().split("T")[0];
-          const cycleEnd   = subEnt.current_end
+          const cycleEnd = subEnt.current_end
             ? new Date(subEnt.current_end * 1000).toISOString().split("T")[0]
             : new Date(Date.now() + 30 * 86_400_000).toISOString().split("T")[0];
 
@@ -11413,9 +11458,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         case "refund.created":
         case "refund.processed": {
           if (!refEnt) { console.warn(`${tag} missing refund entity`); break; }
-          const refundId  = String(refEnt.id          ?? "");
-          const refundAmt = (refEnt.amount             ?? 0) / 100;
-          const paymentId = String(refEnt.payment_id  ?? "");
+          const refundId = String(refEnt.id ?? "");
+          const refundAmt = (refEnt.amount ?? 0) / 100;
+          const paymentId = String(refEnt.payment_id ?? "");
           console.info(`${tag} refundId=${refundId} paymentId=${paymentId} ?${refundAmt}`);
 
           if (eventType === "refund.processed") {
@@ -11492,8 +11537,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return;
     }
 
-    const rawBody  = (req as any).rawBody;
-    const bodyStr  = rawBody ? (rawBody as Buffer).toString() : JSON.stringify(req.body);
+    const rawBody = (req as any).rawBody;
+    const bodyStr = rawBody ? (rawBody as Buffer).toString() : JSON.stringify(req.body);
     const expected = crypto.createHmac("sha256", webhookSecret).update(bodyStr).digest("hex");
 
     let sigValid = false;
@@ -11525,9 +11570,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
 
     // -- 3. Parse event --------------------------------------------------------
-    const event      = req.body;
-    const eventId    = String(event?.id ?? `rzp_${Date.now()}_${Math.random().toString(36).slice(2)}`);
-    const eventType  = String(event?.event ?? "unknown");
+    const event = req.body;
+    const eventId = String(event?.id ?? `rzp_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    const eventType = String(event?.event ?? "unknown");
 
     // -- 4. Idempotency via razorpay_webhook_logs ------------------------------
     // INSERT � ON CONFLICT DO NOTHING: if 0 rows returned, event already logged
@@ -11565,8 +11610,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   };
 
   // Register both URLs � Razorpay dashboard URL + legacy alias
-  app.post("/api/app/razorpay/webhook",  _razorpayWebhookHandler);
-  app.post("/api/webhooks/razorpay",     _razorpayWebhookHandler);
+  app.post("/api/app/razorpay/webhook", _razorpayWebhookHandler);
+  app.post("/api/webhooks/razorpay", _razorpayWebhookHandler);
 
   // -- CUSTOMER: Update profile ----------------------------------------------
   app.patch("/api/app/customer/profile", authApp, async (req, res) => {
@@ -11850,7 +11895,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!label || !address) return res.status(400).json({ message: "label and address required" });
       const r = await rawDb.execute(rawSql`
         INSERT INTO saved_places (user_id, label, address, lat, lng)
-        VALUES (${customer.id}::uuid, ${label}, ${address}, ${lat||0}, ${lng||0})
+        VALUES (${customer.id}::uuid, ${label}, ${address}, ${lat || 0}, ${lng || 0})
         RETURNING *
       `);
       res.json({ success: true, data: camelize(r.rows[0]) });
@@ -12178,7 +12223,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // Accept both dateOfBirth (camelCase) and dob (Flutter sends 'dob')
       const dateOfBirth = req.body.dateOfBirth || req.body.dob || null;
       const { city, vehicleBrand, vehicleColor, vehicleYear, licenseNumber, licenseExpiry,
-              vehicleNumber, vehicleModel, vehicleType, selfieImage } = req.body;
+        vehicleNumber, vehicleModel, vehicleType, selfieImage } = req.body;
       // Accept both 'name' (Flutter) and 'fullName' for driver full name update
       const fullName = req.body.fullName || req.body.name || null;
       const password = req.body.password || null;
@@ -12470,7 +12515,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               : `Account issue: ${note || 'Please re-upload documents or contact support.'}`,
             data: { type: 'verification_update', verificationStatus: status },
           });
-        } catch (_) {}
+        } catch (_) { }
       }
       res.json({ success: true, status });
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -12658,7 +12703,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const user = (req as any).currentUser;
       const { pickupAddress, pickupLat, pickupLng, destinationAddress, destinationLat, destinationLng,
-              vehicleCategoryId, estimatedFare, estimatedDistance, paymentMethod, scheduledAt } = req.body;
+        vehicleCategoryId, estimatedFare, estimatedDistance, paymentMethod, scheduledAt } = req.body;
       if (!scheduledAt) return res.status(400).json({ message: "scheduledAt is required" });
       const scheduledTime = new Date(scheduledAt);
       if (scheduledTime <= new Date()) return res.status(400).json({ message: "Schedule time must be in the future" });
@@ -12918,7 +12963,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         GROUP BY created_at::date
         ORDER BY created_at::date ASC
       `);
-      const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       const today = new Date();
       const result = days.map((d, i) => {
         const date = new Date(today);
@@ -13116,7 +13161,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         ALTER TABLE trip_requests ADD COLUMN IF NOT EXISTS tip_amount NUMERIC(10,2) DEFAULT 0;
         ALTER TABLE trip_requests ADD COLUMN IF NOT EXISTS ride_preferences JSONB;
       `);
-    } catch (_) {}
+    } catch (_) { }
   })();
 
   // ??????????????????????????????????????????????????????????????????
@@ -13526,8 +13571,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         recommendation: fatigueLevel === 'high'
           ? "You've been driving 8+ hours. Please take a long break for your safety!"
           : fatigueLevel === 'medium'
-          ? "You've been driving 5+ hours. Consider a short break soon."
-          : "You're doing great! Keep safe.",
+            ? "You've been driving 5+ hours. Consider a short break soon."
+            : "You're doing great! Keep safe.",
         suggestBreak: fatigueLevel !== 'low',
       });
     } catch (e: any) { res.status(500).json({ message: safeErrMsg(e) }); }
@@ -13622,7 +13667,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       const { service_status, revenue_model, commission_rate } = req.body;
       const updates: string[] = ['updated_at=NOW()'];
       if (service_status !== undefined) updates.push(`service_status='${service_status === 'active' ? 'active' : 'inactive'}'`);
-      if (revenue_model !== undefined && ['subscription','commission','hybrid'].includes(revenue_model)) {
+      if (revenue_model !== undefined && ['subscription', 'commission', 'hybrid'].includes(revenue_model)) {
         updates.push(`revenue_model='${revenue_model}'`);
       }
       if (commission_rate !== undefined) updates.push(`commission_rate=${parseFloat(commission_rate)}`);
@@ -13630,7 +13675,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       const r = await rawDb.execute(rawSql`
         UPDATE platform_services SET updated_at=NOW(),
           service_status = COALESCE(${service_status ?? null}, service_status),
-          revenue_model  = COALESCE(${revenue_model  ?? null}, revenue_model),
+          revenue_model  = COALESCE(${revenue_model ?? null}, revenue_model),
           commission_rate = COALESCE(${commission_rate != null ? parseFloat(commission_rate) : null}, commission_rate)
         WHERE service_key = ${key}
         RETURNING *
@@ -13643,14 +13688,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         // Map service_key ? specific vehicle_type for per-vehicle control
         // Using vehicle_type (not type) so toggling one service doesn't affect others
         const vehicleTypeMap: Record<string, string> = {
-          'bike_ride':       'bike',
-          'bike_taxi':       'bike',
-          'auto_ride':       'auto',
-          'mini_car':        'mini_car',
-          'sedan':           'sedan',
-          'suv':             'suv',
-          'city_pool':       'carpool',
-          'intercity_pool':  'carpool',
+          'bike_ride': 'bike',
+          'bike_taxi': 'bike',
+          'auto_ride': 'auto',
+          'mini_car': 'mini_car',
+          'sedan': 'sedan',
+          'suv': 'suv',
+          'city_pool': 'carpool',
+          'intercity_pool': 'carpool',
           'outstation_pool': 'carpool',
         };
         const vcVehicleType = vehicleTypeMap[key];
@@ -13701,12 +13746,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
   // Hardcoded defaults � fallback only when parcel_vehicle_types DB row not found
   const PARCEL_VEHICLES: Record<string, { baseFare: number; perKm: number; perKg: number; name: string; maxWeightKg: number; loadCharge: number }> = {
-    bike_parcel:   { baseFare: 40,  perKm: 12, perKg: 4,  name: 'Bike Parcel',  maxWeightKg: 10,   loadCharge: 0   },
-    tata_ace:      { baseFare: 150, perKm: 18, perKg: 2,  name: 'Mini Truck',   maxWeightKg: 500,  loadCharge: 50  },
-    pickup_truck:  { baseFare: 200, perKm: 22, perKg: 1,  name: 'Pickup Truck', maxWeightKg: 2000, loadCharge: 100 },
-    auto_parcel:   { baseFare: 50,  perKm: 13, perKg: 7,  name: 'Auto Parcel',  maxWeightKg: 50,   loadCharge: 0   },
-    cargo_car:     { baseFare: 120, perKm: 16, perKg: 4,  name: 'Cargo Car',    maxWeightKg: 200,  loadCharge: 30  },
-    bolero_cargo:  { baseFare: 200, perKm: 22, perKg: 3,  name: 'Bolero Cargo', maxWeightKg: 1500, loadCharge: 80  },
+    bike_parcel: { baseFare: 40, perKm: 12, perKg: 4, name: 'Bike Parcel', maxWeightKg: 10, loadCharge: 0 },
+    tata_ace: { baseFare: 150, perKm: 18, perKg: 2, name: 'Mini Truck', maxWeightKg: 500, loadCharge: 50 },
+    pickup_truck: { baseFare: 200, perKm: 22, perKg: 1, name: 'Pickup Truck', maxWeightKg: 2000, loadCharge: 100 },
+    auto_parcel: { baseFare: 50, perKm: 13, perKg: 7, name: 'Auto Parcel', maxWeightKg: 50, loadCharge: 0 },
+    cargo_car: { baseFare: 120, perKm: 16, perKg: 4, name: 'Cargo Car', maxWeightKg: 200, loadCharge: 30 },
+    bolero_cargo: { baseFare: 200, perKm: 22, perKg: 3, name: 'Bolero Cargo', maxWeightKg: 1500, loadCharge: 80 },
   };
 
   // Shared helper: resolves zone-aware parcel fare rates for a given vehicle + pickup location.
@@ -13725,12 +13770,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     `).catch(() => ({ rows: [] as any[] }));
     const pv = pvRes.rows[0] as any;
     const hc = PARCEL_VEHICLES[vehicleCategory] || PARCEL_VEHICLES.bike_parcel;
-    const vehicleName  = pv?.name           || hc.name;
-    const maxWeightKg  = safeFloat(pv?.max_weight_kg  ?? hc.maxWeightKg, 10);
-    const vcBaseFare   = safeFloat(pv?.base_fare      ?? hc.baseFare,    30);
-    const vcPerKm      = safeFloat(pv?.per_km         ?? hc.perKm,       8);
-    const vcPerKg      = safeFloat(pv?.per_kg         ?? hc.perKg,       5);
-    const vcLoadCharge = safeFloat(pv?.load_charge    ?? hc.loadCharge,  0);
+    const vehicleName = pv?.name || hc.name;
+    const maxWeightKg = safeFloat(pv?.max_weight_kg ?? hc.maxWeightKg, 10);
+    const vcBaseFare = safeFloat(pv?.base_fare ?? hc.baseFare, 30);
+    const vcPerKm = safeFloat(pv?.per_km ?? hc.perKm, 8);
+    const vcPerKg = safeFloat(pv?.per_kg ?? hc.perKg, 5);
+    const vcLoadCharge = safeFloat(pv?.load_charge ?? hc.loadCharge, 0);
 
     // 2. Zone-based parcel_fares override
     let pfRow: any = {};
@@ -13752,28 +13797,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       if (pfRes.rows.length) pfRow = pfRes.rows[0];
     }
 
-    const baseFare    = pfRow.base_fare      != null ? safeFloat(pfRow.base_fare,       vcBaseFare)   : vcBaseFare;
-    const perKm       = pfRow.fare_per_km    != null ? safeFloat(pfRow.fare_per_km,     vcPerKm)      : vcPerKm;
-    const perKg       = pfRow.fare_per_kg    != null ? safeFloat(pfRow.fare_per_kg,     vcPerKg)      : vcPerKg;
-    const loadCharge  = pfRow.loading_charge != null ? safeFloat(pfRow.loading_charge,  vcLoadCharge) : vcLoadCharge;
-    const minFare     = pfRow.minimum_fare   != null ? safeFloat(pfRow.minimum_fare,    0)            : 0;
-    const helperRate  = safeFloat(pfRow.helper_charge_per_hour, 0);
-    const maxHelpers  = parseInt(pfRow.max_helpers || '0') || 0;
+    const baseFare = pfRow.base_fare != null ? safeFloat(pfRow.base_fare, vcBaseFare) : vcBaseFare;
+    const perKm = pfRow.fare_per_km != null ? safeFloat(pfRow.fare_per_km, vcPerKm) : vcPerKm;
+    const perKg = pfRow.fare_per_kg != null ? safeFloat(pfRow.fare_per_kg, vcPerKg) : vcPerKg;
+    const loadCharge = pfRow.loading_charge != null ? safeFloat(pfRow.loading_charge, vcLoadCharge) : vcLoadCharge;
+    const minFare = pfRow.minimum_fare != null ? safeFloat(pfRow.minimum_fare, 0) : 0;
+    const helperRate = safeFloat(pfRow.helper_charge_per_hour, 0);
+    const maxHelpers = parseInt(pfRow.max_helpers || '0') || 0;
 
     // 3. Configurable commission from platform_services
     const platRes = await rawDb.execute(rawSql`
       SELECT commission_pct FROM platform_services WHERE service_key = 'parcel_delivery' LIMIT 1
     `).catch(() => ({ rows: [] as any[] }));
     const commPctNum = safeFloat((platRes.rows[0] as any)?.commission_pct, 15);
-    const commRate   = commPctNum / 100;
-    const gstRate    = 0.05;
+    const commRate = commPctNum / 100;
+    const gstRate = 0.05;
 
     // 4. Fare calculation
-    const rawFare      = baseFare + (distKm * perKm) + (wt * perKg) + loadCharge;
+    const rawFare = baseFare + (distKm * perKm) + (wt * perKg) + loadCharge;
     const customerFare = Math.ceil(Math.max(rawFare, minFare));
-    const gstAmt       = Math.ceil(customerFare * gstRate);
-    const grandTotal   = customerFare + gstAmt;
-    const commAmt      = Math.ceil(customerFare * commRate);
+    const gstAmt = Math.ceil(customerFare * gstRate);
+    const grandTotal = customerFare + gstAmt;
+    const commAmt = Math.ceil(customerFare * commRate);
     const driverEarnings = Math.max(0, customerFare - commAmt);
 
     return {
@@ -13790,8 +13835,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   app.post("/api/app/parcel/quote", authApp, async (req, res) => {
     try {
       const { vehicleCategory = 'bike_parcel', dropLocations = [], weightKg = 1,
-              totalDistanceKm, pickupLat, pickupLng } = req.body;
-      const wt   = Math.max(0.1, safeFloat(weightKg, 1));
+        totalDistanceKm, pickupLat, pickupLng } = req.body;
+      const wt = Math.max(0.1, safeFloat(weightKg, 1));
       const dist = Math.max(0.5, safeFloat(totalDistanceKm, 5));
 
       const f = await resolveParcelFare(
@@ -13905,15 +13950,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         insurancePremium = ins.premiumAmount;
       }
 
-      const baseFare   = f.baseFare;
-      const distFare   = f.distFare;
-      const wFare      = f.weightFare;
+      const baseFare = f.baseFare;
+      const distFare = f.distFare;
+      const wFare = f.weightFare;
       const loadCharge = f.loadCharge;
-      const gstAmt     = f.gstAmt;
-      const totalFare  = f.grandTotal + insurancePremium;
-      const commPct    = f.commPct;
-      const commAmt    = f.commAmt;
-      const pickupOtp  = Math.floor(100000 + Math.random() * 900000).toString();
+      const gstAmt = f.gstAmt;
+      const totalFare = f.grandTotal + insurancePremium;
+      const commPct = f.commPct;
+      const commAmt = f.commAmt;
+      const pickupOtp = Math.floor(100000 + Math.random() * 900000).toString();
       const expectedMinutes = calculateExpectedDeliveryMinutes(vehicleCategory, dist);
 
       // Check if customer already has an active/searching parcel order
@@ -13992,7 +14037,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
               }).catch(dbCatch("db"));
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // Fire B2B webhook if applicable
@@ -14358,8 +14403,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       if (!r.rows.length) return res.status(404).json({ message: "Parcel receipt not found" });
       const o = camelize(r.rows[0]) as any;
       const drops: any[] = typeof o.dropLocations === 'string' ? JSON.parse(o.dropLocations) : (o.dropLocations || []);
-      const dateStr = new Date(o.updatedAt || o.createdAt).toISOString().slice(0,10).replace(/-/g,'');
-      const receiptNo = `PCL-${dateStr}-${(o.id || '').slice(0,8).toUpperCase()}`;
+      const dateStr = new Date(o.updatedAt || o.createdAt).toISOString().slice(0, 10).replace(/-/g, '');
+      const receiptNo = `PCL-${dateStr}-${(o.id || '').slice(0, 8).toUpperCase()}`;
 
       res.json({
         receipt: {
@@ -14602,7 +14647,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     try {
       const companyId = req.params.companyId as string;
       const { customerId, vehicleCategory = 'bike_parcel', pickupAddress, pickupLat, pickupLng,
-              pickupContactName, pickupContactPhone, deliveries = [], weightKg = 1, notes = '' } = req.body;
+        pickupContactName, pickupContactPhone, deliveries = [], weightKg = 1, notes = '' } = req.body;
       if (!pickupAddress) return res.status(400).json({ message: 'pickupAddress required' });
       if (!(deliveries as any[]).length) return res.status(400).json({ message: 'deliveries array required' });
 
@@ -14621,13 +14666,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       let grandTotal = 0;
       const deliveryList = deliveries as any[];
       for (const delivery of deliveryList) {
-        const dist  = parseFloat(delivery.distanceKm ?? '5') || 5;
+        const dist = parseFloat(delivery.distanceKm ?? '5') || 5;
         grandTotal += (vc.baseFare + Math.round(dist * vc.perKm) + Math.round(wt * vc.perKg));
       }
 
-      const walletBal  = parseFloat(company.wallet_balance || '0');
+      const walletBal = parseFloat(company.wallet_balance || '0');
       const creditLimit = parseFloat(company.credit_limit || '0');
-      const available  = walletBal + creditLimit;
+      const available = walletBal + creditLimit;
       if (available < grandTotal) {
         return res.status(402).json({
           message: `Insufficient balance. Required: ?${grandTotal}, Available: ?${available.toFixed(2)} (wallet: ?${walletBal.toFixed(2)} + credit: ?${creditLimit.toFixed(2)})`
@@ -14650,12 +14695,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
       const results: any[] = [];
       for (const delivery of deliveryList) {
-        const dist     = parseFloat(delivery.distanceKm ?? '5') || 5;
+        const dist = parseFloat(delivery.distanceKm ?? '5') || 5;
         const baseFare = vc.baseFare;
-        const distF    = Math.round(dist * vc.perKm);
-        const wtF      = Math.round(wt * vc.perKg);
-        const total    = baseFare + distF + wtF;
-        const commAmt  = Math.round(total * 0.15);
+        const distF = Math.round(dist * vc.perKm);
+        const wtF = Math.round(wt * vc.perKg);
+        const total = baseFare + distF + wtF;
+        const commAmt = Math.round(total * 0.15);
         const pickupOtp = Math.floor(100000 + Math.random() * 900000).toString();
         const drops = [{
           address: delivery.dropAddress,
@@ -14936,7 +14981,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
           AND t.driver_accepted_at IS NOT NULL
           AND t.driver_accepted_at < NOW() - INTERVAL '15 minutes'
           AND NOT EXISTS (
-            SELECT 1 FROM trip_status_log l
+            SELECT 1 FROM trip_status l
             WHERE l.trip_id = t.id AND l.status = 'arrival_delayed'
           )
       `);
@@ -14957,7 +15002,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
         }
         // Log so we don't spam notifications
         await rawDb.execute(rawSql`
-          INSERT INTO trip_status_log (trip_id, status, changed_by, note)
+          INSERT INTO trip_status (trip_id, status, source, note)
           VALUES (${r.id}::uuid, 'arrival_delayed', 'system', 'Driver accepted >15 min ago, not yet arrived')
         `).catch(dbCatch("db"));
         console.log(`[ARRIVAL-TIMEOUT] Trip ${r.id} � driver accepted 15+ min ago, notified parties`);
@@ -15342,16 +15387,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       // Convert grid size to degrees (~111,320 m per degree at equator)
       const gridDeg = gridMeters / 111320;
 
-      const lowT    = parseFloat(cfg.low_demand_threshold   ?? '0.5');
-      const medT    = parseFloat(cfg.medium_demand_threshold ?? '1.5');
-      const highT   = parseFloat(cfg.high_demand_threshold  ?? '3.0');
+      const lowT = parseFloat(cfg.low_demand_threshold ?? '0.5');
+      const medT = parseFloat(cfg.medium_demand_threshold ?? '1.5');
+      const highT = parseFloat(cfg.high_demand_threshold ?? '3.0');
 
-      const eLoMin  = parseInt(cfg.earning_low_min    ?? '60');
-      const eLoMax  = parseInt(cfg.earning_low_max    ?? '130');
+      const eLoMin = parseInt(cfg.earning_low_min ?? '60');
+      const eLoMax = parseInt(cfg.earning_low_max ?? '130');
       const eMedMin = parseInt(cfg.earning_medium_min ?? '120');
       const eMedMax = parseInt(cfg.earning_medium_max ?? '220');
-      const eHiMin  = parseInt(cfg.earning_high_min   ?? '200');
-      const eHiMax  = parseInt(cfg.earning_high_max   ?? '350');
+      const eHiMin = parseInt(cfg.earning_high_min ?? '200');
+      const eHiMax = parseInt(cfg.earning_high_max ?? '350');
 
       // Fetch recent demand events
       const evtR = await rawDb.execute(rawSql`
@@ -15563,11 +15608,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       let icon = level === 'high' ? '??' : '??';
       const svc = z.service_breakdown || {};
       const topService = Object.entries(svc as Record<string, number>)
-        .sort(([,a],[,b]) => (b as number) - (a as number))[0]?.[0] || 'ride';
+        .sort(([, a], [, b]) => (b as number) - (a as number))[0]?.[0] || 'ride';
       const svcLabel = topService === 'parcel' ? 'Parcel delivery'
         : topService === 'pool' ? 'Pool rides'
-        : topService === 'cargo' ? 'Cargo'
-        : 'Ride requests';
+          : topService === 'cargo' ? 'Cargo'
+            : 'Ride requests';
 
       res.json({
         suggestion: {
@@ -15722,8 +15767,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   app.post("/api/admin/surge-configs", requireAdminAuth, async (req, res) => {
     try {
       const { serviceType = 'all', minMultiplier = 1.0, maxMultiplier = 3.0, demandThreshold = 1.5,
-              peakHoursEnabled = true, peakHourStart = 8, peakHourEnd = 10, peakHourMultiplier = 1.3,
-              weatherMultiplier = 1.0, manualSurge = null, zoneId = null } = req.body;
+        peakHoursEnabled = true, peakHourStart = 8, peakHourEnd = 10, peakHourMultiplier = 1.3,
+        weatherMultiplier = 1.0, manualSurge = null, zoneId = null } = req.body;
       const r = await rawDb.execute(rawSql`
         INSERT INTO surge_configs (zone_id, service_type, min_multiplier, max_multiplier, demand_threshold,
           peak_hours_enabled, peak_hour_start, peak_hour_end, peak_hour_multiplier, weather_multiplier, manual_surge, is_active)
@@ -15739,8 +15784,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     try {
       const { id } = req.params;
       const { serviceType, minMultiplier, maxMultiplier, demandThreshold,
-              peakHoursEnabled, peakHourStart, peakHourEnd, peakHourMultiplier,
-              weatherMultiplier, manualSurge, isActive } = req.body;
+        peakHoursEnabled, peakHourStart, peakHourEnd, peakHourMultiplier,
+        weatherMultiplier, manualSurge, isActive } = req.body;
       await rawDb.execute(rawSql`
         UPDATE surge_configs SET
           service_type = COALESCE(${serviceType}, service_type),
@@ -16071,7 +16116,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       const { companyId } = req.params;
       const customerId = (req as any).currentUser?.id;
       const { vehicleCategory = 'bike_parcel', pickupAddress, pickupLat, pickupLng,
-              pickupContactName, pickupContactPhone } = req.body;
+        pickupContactName, pickupContactPhone } = req.body;
 
       if (!req.file) return res.status(400).json({ message: "CSV file required" });
       if (!pickupAddress) return res.status(400).json({ message: "pickupAddress required" });
@@ -16152,7 +16197,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       }
 
       // Clean up uploaded file
-      fs.unlink(req.file.path, () => {});
+      fs.unlink(req.file.path, () => { });
 
       res.json({
         success: true,
@@ -16506,12 +16551,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     try {
       const settings = await loadRevenueSettings();
       const services = [
-        { service: "rides",           modelKey: "rides_model",           model: settings.rides_model || "subscription" },
-        { service: "parcel",          modelKey: "parcels_model",         model: settings.parcels_model || "commission" },
-        { service: "b2b_parcel",      modelKey: "parcels_model",         model: settings.parcels_model || "commission" },
-        { service: "cargo",           modelKey: "cargo_model",           model: settings.cargo_model || "commission" },
-        { service: "intercity",       modelKey: "intercity_model",       model: settings.intercity_model || "commission" },
-        { service: "city_pool",       modelKey: "city_pool_model",       model: settings.city_pool_model || "commission" },
+        { service: "rides", modelKey: "rides_model", model: settings.rides_model || "subscription" },
+        { service: "parcel", modelKey: "parcels_model", model: settings.parcels_model || "commission" },
+        { service: "b2b_parcel", modelKey: "parcels_model", model: settings.parcels_model || "commission" },
+        { service: "cargo", modelKey: "cargo_model", model: settings.cargo_model || "commission" },
+        { service: "intercity", modelKey: "intercity_model", model: settings.intercity_model || "commission" },
+        { service: "city_pool", modelKey: "city_pool_model", model: settings.city_pool_model || "commission" },
         { service: "outstation_pool", modelKey: "outstation_pool_model", model: settings.outstation_pool_model || "commission" },
       ];
       res.json({

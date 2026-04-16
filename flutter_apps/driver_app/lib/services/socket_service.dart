@@ -316,16 +316,25 @@ class SocketService {
   Future<bool> acceptTrip(String tripId) async {
     if (!_isConnected) return false;
     final completer = Completer<bool>();
+
+    // Safe complete guard — prevents double-completion race between ack and once listeners
+    void safeComplete(bool value) {
+      if (!completer.isCompleted) completer.complete(value);
+    }
+
     _socket!.emitWithAck('driver:accept_trip', {'tripId': tripId}, ack: (data) {
-      completer.complete(true);
+      safeComplete(true);
     });
-    _socket!.once('driver:accept_trip_ok', (_) {
-      if (!completer.isCompleted) completer.complete(true);
-    });
-    _socket!.once('driver:accept_trip_error', (_) {
-      if (!completer.isCompleted) completer.complete(false);
-    });
-    return completer.future.timeout(const Duration(seconds: 10), onTimeout: () => false);
+    _socket!.once('driver:accept_trip_ok', (_) => safeComplete(true));
+    _socket!.once('driver:accept_trip_error', (_) => safeComplete(false));
+
+    return completer.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        safeComplete(false);
+        return false;
+      },
+    );
   }
 
   void updateTripStatus(String tripId, String status, {String? otp}) {

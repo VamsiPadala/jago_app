@@ -105,13 +105,6 @@ async function getGoogleMapsKey(): Promise<string | null> {
   if (cachedApiKey && Date.now() - apiKeyFetchedAt < 5 * 60 * 1000) return cachedApiKey;
 
   try {
-    const envKey = process.env.GOOGLE_MAPS_API_KEY;
-    if (envKey) {
-      cachedApiKey = envKey;
-      apiKeyFetchedAt = Date.now();
-      return cachedApiKey;
-    }
-
     const r = await rawDb.execute(rawSql`
       SELECT value FROM business_settings WHERE key_name IN ('google_maps_key', 'GOOGLE_MAPS_API_KEY') LIMIT 1
     `);
@@ -119,6 +112,14 @@ async function getGoogleMapsKey(): Promise<string | null> {
     if (val) {
       cachedApiKey = val;
       apiKeyFetchedAt = Date.now();
+      return cachedApiKey;
+    }
+
+    const envKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (envKey) {
+      cachedApiKey = envKey;
+      apiKeyFetchedAt = Date.now();
+      return cachedApiKey;
     }
     return cachedApiKey;
   } catch {

@@ -78,13 +78,15 @@ let apiKeyFetchedAt = 0;
 async function getGoogleMapsKey(): Promise<string | null> {
   if (cachedApiKey && Date.now() - apiKeyFetchedAt < 5 * 60 * 1000) return cachedApiKey;
   try {
-    const envKey = process.env.GOOGLE_MAPS_API_KEY;
-    if (envKey) { cachedApiKey = envKey; apiKeyFetchedAt = Date.now(); return cachedApiKey; }
     const r = await rawDb.execute(rawSql`
       SELECT value FROM business_settings WHERE key_name IN ('google_maps_key', 'GOOGLE_MAPS_API_KEY') LIMIT 1
     `);
     const val = (r.rows[0] as any)?.value?.trim();
-    if (val) { cachedApiKey = val; apiKeyFetchedAt = Date.now(); }
+    if (val) { cachedApiKey = val; apiKeyFetchedAt = Date.now(); return cachedApiKey; }
+
+    const envKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (envKey) { cachedApiKey = envKey; apiKeyFetchedAt = Date.now(); return cachedApiKey; }
+    
     return cachedApiKey;
   } catch { return cachedApiKey; }
 }
@@ -155,7 +157,7 @@ export async function searchPlaces(
   const timeout = setTimeout(() => controller.abort(), 4000);
 
   try {
-    let url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(query)}&key=${apiKey}&components=country:in`;
+    let url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(query)}&key=${apiKey}`;
 
     if (lat && lng) {
       url += `&location=${lat},${lng}&radius=${radius || 50000}`;
@@ -164,9 +166,17 @@ export async function searchPlaces(
       url += `&sessiontoken=${encodeURIComponent(sessionToken)}`;
     }
 
-    const r = await fetch(url, { signal: controller.signal });
-    if (!r.ok) return searchPopularLocations(query);
+    console.log(`[mapping] Fetching from Google: ${url.replace(apiKey, "REDACTED")}`);
+    const r = await fetch(url, { 
+      signal: controller.signal,
+      headers: { 'Referer': 'https://jagopro.org' }
+    });
+    if (!r.ok) {
+        console.error(`[mapping] Google API returned status ${r.status}`);
+        return searchPopularLocations(query);
+    }
     const data = await r.json() as any;
+    console.log(`[mapping] Google response status: ${data.status}`);
 
     if (data?.status !== "OK") {
       console.warn(`[mapping-unified:searchPlaces] API Status: ${data?.status}, Msg: ${data?.error_message || 'none'}`);
@@ -174,7 +184,7 @@ export async function searchPlaces(
     }
 
     if (!data.predictions?.length) {
-      return searchPopularLocations(query);
+      return searchNominatimFallback(query);
     }
 
     const results: PlacePrediction[] = data.predictions.map((p: any) => ({
@@ -189,10 +199,56 @@ export async function searchPlaces(
     return results;
   } catch (e: any) {
     console.error(`[mapping-unified:searchPlaces] Failed:`, e.message || e);
-    return searchPopularLocations(query);
+    return searchNominatimFallback(query);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function searchNominatimFallback(query: string): Promise<PlacePrediction[]> {
+  try {
+    const nomController = new AbortController();
+    const nomTimeout = setTimeout(() => nomController.abort(), 4000);
+    const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=15`;
+    
+    const nr = await fetch(nomUrl, {
+      signal: nomController.signal,
+      headers: { "User-Agent": "JagoPro/1.0 (ride-hailing app)" }
+    });
+    
+    clearTimeout(nomTimeout);
+    
+    if (nr.ok) {
+      const nd = await nr.json() as any[];
+      if (Array.isArray(nd) && nd.length > 0) {
+        const results: PlacePrediction[] = nd.map((p: any) => {
+          const parts = (p.display_name || "").split(",");
+          const main = p.name || parts[0];
+          const sec = parts.slice(1).join(",").trim();
+          return {
+            placeId: `nom:${p.place_id}`,
+            mainText: main,
+            secondaryText: sec,
+            fullDescription: p.display_name || "",
+            types: [p.type || "point_of_interest"],
+            lat: parseFloat(p.lat) || 0,
+            lng: parseFloat(p.lon) || 0,
+          };
+        });
+        
+        // Deduplicate nominatim results by mainText
+        const unique = new Map<string, PlacePrediction>();
+        for (const res of results) {
+          const key = (res.mainText + res.secondaryText).toLowerCase();
+          if (!unique.has(key)) unique.set(key, res);
+        }
+        return Array.from(unique.values()).slice(0, 8);
+      }
+    }
+  } catch(e) {
+    console.error("[mapping-unified] Nominatim fallback failed:", e);
+  }
+  return searchPopularLocations(query);
 }
 
 /**
@@ -213,7 +269,10 @@ export async function getPlaceDetails(
     let url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(placeId)}&fields=geometry,formatted_address,name,address_components&key=${apiKey}`;
     if (sessionToken) url += `&sessiontoken=${encodeURIComponent(sessionToken)}`;
 
-    const r = await fetch(url, { signal: controller.signal });
+    const r = await fetch(url, { 
+      signal: controller.signal,
+      headers: { 'Referer': 'https://jagopro.org' }
+    });
     if (!r.ok) return null;
     const data = await r.json() as any;
 
@@ -237,7 +296,7 @@ export async function getPlaceDetails(
 async function searchPopularLocations(query: string): Promise<PlacePrediction[]> {
   try {
     const r = await rawDb.execute(rawSql`
-      SELECT name, full_address, latitude, longitude
+      SELECT DISTINCT name, full_address, latitude, longitude
       FROM popular_locations
       WHERE is_active = true
         AND (LOWER(name) LIKE ${"%" + query.toLowerCase() + "%"}
@@ -245,7 +304,7 @@ async function searchPopularLocations(query: string): Promise<PlacePrediction[]>
       ORDER BY name ASC
       LIMIT 10
     `);
-    return r.rows.map((row: any) => ({
+    const rawResults = r.rows.map((row: any) => ({
       placeId: `local:${row.name}`,
       mainText: row.name,
       secondaryText: row.full_address || "",
@@ -254,6 +313,15 @@ async function searchPopularLocations(query: string): Promise<PlacePrediction[]>
       lat: parseFloat(String(row.latitude)) || 0,
       lng: parseFloat(String(row.longitude)) || 0,
     }));
+
+    // Deduplicate by name to prevent multiple results for the same location
+    const unique = new Map<string, PlacePrediction>();
+    for (const res of rawResults) {
+      if (!unique.has(res.mainText.toLowerCase())) {
+        unique.set(res.mainText.toLowerCase(), res);
+      }
+    }
+    return Array.from(unique.values());
   } catch {
     return [];
   }
@@ -300,7 +368,10 @@ export async function reverseGeocode(
     const timeout = setTimeout(() => controller.abort(), 4000);
     try {
       const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}`;
-      const r = await fetch(url, { signal: controller.signal });
+      const r = await fetch(url, { 
+      signal: controller.signal,
+      headers: { 'Referer': 'https://jagopro.org' }
+    });
       if (r.ok) {
         const data = await r.json() as any;
         if (data?.status === "OK" && data.results?.length) {
@@ -439,7 +510,10 @@ export async function getMultiWaypointRoute(
     const optimizeParam = optimize ? "optimize:true|" : "";
 
     const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}&waypoints=${optimizeParam}${wpParam}&key=${apiKey}`;
-    const r = await fetch(url, { signal: controller.signal });
+    const r = await fetch(url, { 
+      signal: controller.signal,
+      headers: { 'Referer': 'https://jagopro.org' }
+    });
     if (!r.ok) return haversineMultiRoute(origin, destination, waypoints);
     const data = await r.json() as any;
 
@@ -545,7 +619,10 @@ export async function getRealTimeETA(
 
   try {
     const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${driverLat},${driverLng}&destinations=${destLat},${destLng}&departure_time=now&traffic_model=best_guess&key=${apiKey}`;
-    const r = await fetch(url, { signal: controller.signal });
+    const r = await fetch(url, { 
+      signal: controller.signal,
+      headers: { 'Referer': 'https://jagopro.org' }
+    });
     if (!r.ok) throw new Error("API failed");
     const data = await r.json() as any;
     const el = data?.rows?.[0]?.elements?.[0];

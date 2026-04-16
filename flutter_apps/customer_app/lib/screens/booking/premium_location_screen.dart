@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../config/api_config.dart';
 import '../../config/jago_theme.dart';
 import '../../services/auth_service.dart';
@@ -54,11 +52,18 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
   bool _detectingLocation = false;
   List<Map<String, dynamic>> _searchResults = [];
   bool _searching = false;
+  String? _searchError;
   bool _editingPickup = false; // true = editing pickup, false = editing drop
   Timer? _debounce;
 
   // Header state (simulating home header)
   int _unreadNotifCount = 0;
+
+  bool get _isTyping => _pickupFocus.hasFocus || _dropFocus.hasFocus;
+
+  void _onFocusChange() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
@@ -70,6 +75,9 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
 
     if (_pickup.isEmpty) _detectLocation();
     _fetchUnreadCount();
+
+    _pickupFocus.addListener(_onFocusChange);
+    _dropFocus.addListener(_onFocusChange);
 
     // Auto-focus drop field if pickup is ready
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -154,27 +162,53 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
       setState(() => _searchResults = []);
       return;
     }
-    _debounce = Timer(const Duration(milliseconds: 500), () => _search(q));
+    _debounce = Timer(const Duration(milliseconds: 300), () => _search(q));
   }
 
   Future<void> _search(String query) async {
-    setState(() => _searching = true);
+    setState(() {
+      _searching = true;
+      _searchError = null;
+    });
+    
     try {
       final headers = await AuthService.getHeaders();
-      final r = await http.get(Uri.parse('${ApiConfig.placesAutocomplete}?query=$query'), headers: headers);
-      if (r.statusCode == 200 && mounted) {
+      final url = Uri.parse('${ApiConfig.placesAutocomplete}?query=$query');
+      print('DEBUG: Searching locations with URL: $url');
+      
+      final r = await http.get(url, headers: headers).timeout(const Duration(seconds: 10));
+      print('DEBUG: Search response status: ${r.statusCode}');
+      
+      if (r.statusCode == 200) {
         final data = jsonDecode(r.body);
+        final List preds = data['predictions'] ?? [];
+        print('DEBUG: Found ${preds.length} predictions');
+        
         setState(() {
-          _searchResults = (data['predictions'] as List).map((p) => {
-            'name': p['mainText'] ?? p['fullDescription'] ?? '',
-            'placeId': p['placeId'] ?? '',
+          _searchResults = preds.map((p) => {
+            'placeId': p['placeId'] ?? p['place_id'] ?? '',
+            'mainText': p['mainText'] ?? p['structured_formatting']?['main_text'] ?? p['description']?.split(',')[0] ?? '',
+            'secondaryText': p['secondaryText'] ?? p['structured_formatting']?['secondary_text'] ?? '',
+            'name': p['mainText'] ?? p['structured_formatting']?['main_text'] ?? p['description']?.split(',')[0] ?? '',
             'lat': (p['lat'] as num?)?.toDouble() ?? 0.0,
             'lng': (p['lng'] as num?)?.toDouble() ?? 0.0,
           }).toList();
+          _searching = false;
+        });
+      } else {
+        print('DEBUG: Search failed with status: ${r.statusCode}, body: ${r.body}');
+        setState(() {
+          _searchError = 'Search failed (Status ${r.statusCode})';
+          _searching = false;
         });
       }
-    } catch (_) {}
-    if (mounted) setState(() => _searching = false);
+    } catch (e) {
+      print('DEBUG: Search error: $e');
+      setState(() {
+        _searchError = 'Network error during search';
+        _searching = false;
+      });
+    }
   }
 
   Future<void> _selectPlace(Map<String, dynamic> p) async {
@@ -197,6 +231,11 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
       setState(() => _detectingLocation = false);
     }
 
+    // Dismiss keyboard BEFORE setState so _isTyping = false makes Confirm button visible
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Future.delayed(const Duration(milliseconds: 80));
+
+    if (!mounted) return;
     setState(() {
       if (_editingPickup) {
         _pickup = name; _pickupLat = lat; _pickupLng = lng; _pickupCtrl.text = name;
@@ -205,7 +244,16 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
       }
       _searchResults = [];
     });
-    FocusScope.of(context).unfocus();
+
+    // Auto-focus the next empty field to speed up the flow
+    await Future.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
+    if (_editingPickup && _drop.isEmpty) {
+      _dropFocus.requestFocus();
+    } else if (!_editingPickup && _pickup.isEmpty) {
+      _pickupFocus.requestFocus();
+    }
+    // If both are filled → leave keyboard closed so Confirm Route is visible
   }
 
   void _swapLocations() {
@@ -303,33 +351,32 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
           SafeArea(
             child: Column(
               children: [
-                _buildHeader(),
-                const SizedBox(height: 10),
+                if (!_isTyping) _buildHeader(),
+                if (!_isTyping) const SizedBox(height: 10),
                 Expanded(
                   child: SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    padding: EdgeInsets.symmetric(horizontal: _isTyping ? 0 : 20),
                     child: Column(
                       children: [
-                        const SizedBox(height: 10),
-                        // "Set your route" text
-                        Text(
-                          "Set your route",
-                          style: GoogleFonts.poppins(
-                            fontSize: 24,
-                            fontWeight: FontWeight.w700,
-                            color: const Color(0xFF1E293B),
-                            letterSpacing: -0.5,
+                        if (!_isTyping) ...[
+                          const SizedBox(height: 10),
+                          // "Set your route" text
+                          Text(
+                            "Set your route",
+                            style: GoogleFonts.poppins(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w700,
+                              color: const Color(0xFF1E293B),
+                              letterSpacing: -0.5,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 20),
+                          const SizedBox(height: 20),
+                        ] else ...[
+                          const SizedBox(height: 10),
+                        ],
 
                         // Route card
                         _buildRouteCard(),
-
-                        if (_searchResults.isNotEmpty) ...[
-                          const SizedBox(height: 20),
-                          _buildSearchResults(),
-                        ],
 
                         // Bottom padding so card doesn't overlap the image
                         const SizedBox(height: 40),
@@ -475,43 +522,79 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
             trailing: _buildSelectOnMapBtn(),
           ),
 
-          const SizedBox(height: 28),
+          // Search Results Dynamic Inject
+          AnimatedSize(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_searching) ...[
+                  const SizedBox(height: 30),
+                  const CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF3B48D1))),
+                  const SizedBox(height: 10),
+                  const Text("Searching available locations...", style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ] else if (_searchError != null) ...[
+                  const SizedBox(height: 30),
+                  Text(_searchError!, style: const TextStyle(color: Colors.redAccent)),
+                  TextButton(onPressed: () => _search(_editingPickup ? _pickupCtrl.text : _dropCtrl.text), child: const Text("Retry"))
+                ] else if (_searchResults.isNotEmpty) ...[
+                  const SizedBox(height: 20),
+                  _buildSearchResults(),
+                ] else if ((_editingPickup ? _pickupCtrl.text : _dropCtrl.text).length >= 3) ...[
+                  const SizedBox(height: 30),
+                  const Text("No locations found. Try a different search.", style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ],
+              ],
+            ),
+          ),
 
-          // Full-width Confirm button
-          SizedBox(
-            width: double.infinity,
-            height: 58,
-            child: GestureDetector(
-              onTap: _confirm,
-              child: Container(
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF4F46E5)]),
-                  borderRadius: BorderRadius.circular(18),
-                  boxShadow: [
-                    BoxShadow(color: const Color(0xFF6366F1).withValues(alpha: 0.3), blurRadius: 16, offset: const Offset(0, 6)),
-                  ],
-                ),
-                child: Center(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        "Confirm Route",
-                        style: GoogleFonts.poppins(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white,
-                          letterSpacing: 0.3,
+          // Show Confirm button whenever NOT actively typing OR both locations are filled
+          if (!_isTyping || (_pickupLat != 0 && _dropLat != 0)) ...[
+            const SizedBox(height: 28),
+            // Full-width Confirm button
+            SizedBox(
+              width: double.infinity,
+              height: 58,
+              child: GestureDetector(
+                onTap: _confirm,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  decoration: BoxDecoration(
+                    gradient: (_pickupLat != 0 && _dropLat != 0)
+                      ? const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF4F46E5)])
+                      : const LinearGradient(colors: [Color(0xFFCBD5E1), Color(0xFFCBD5E1)]),
+                    borderRadius: BorderRadius.circular(18),
+                    boxShadow: (_pickupLat != 0 && _dropLat != 0) ? [
+                      BoxShadow(color: const Color(0xFF6366F1).withValues(alpha: 0.3), blurRadius: 16, offset: const Offset(0, 6)),
+                    ] : [],
+                  ),
+                  child: Center(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          (_pickup.isEmpty || _drop.isEmpty)
+                            ? "Enter Pickup & Drop"
+                            : "Confirm Route",
+                          style: GoogleFonts.poppins(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white,
+                            letterSpacing: 0.3,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      const Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 22),
-                    ],
+                        if (_pickupLat != 0 && _dropLat != 0) ...[
+                          const SizedBox(width: 10),
+                          const Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 22),
+                        ],
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -735,8 +818,35 @@ class _PremiumLocationScreenState extends State<PremiumLocationScreen> with Tick
         itemBuilder: (context, index) {
           final p = _searchResults[index];
           return ListTile(
-            leading: const CircleAvatar(backgroundColor: Color(0xFFF1F5F9), child: Icon(Icons.location_on_outlined, color: Color(0xFF3B48D1), size: 20)),
-            title: Text(p['name'], style: GoogleFonts.poppins(fontSize: 14, fontWeight: FontWeight.w500, color: const Color(0xFF1E293B))),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            leading: Container(
+              width: 38,
+              height: 38,
+              decoration: const BoxDecoration(
+                color: Color(0xFFF1F5F9),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.location_on_outlined, color: Color(0xFF3B48D1), size: 20),
+            ),
+            title: Text(
+              p['mainText'] ?? p['name'] ?? '',
+              style: GoogleFonts.poppins(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: const Color(0xFF1E293B),
+              ),
+            ),
+            subtitle: (p['secondaryText'] ?? '').toString().isNotEmpty
+                ? Text(
+                    p['secondaryText'],
+                    style: GoogleFonts.poppins(
+                      fontSize: 12,
+                      color: const Color(0xFF64748B),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                : null,
             onTap: () => _selectPlace(p),
           );
         },

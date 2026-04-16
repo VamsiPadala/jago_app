@@ -114,7 +114,16 @@ class SocketService {
       _connectedController.add(false);
     });
 
-    _socket!.on('error', (_) {
+    _socket!.on('error', (err) {
+      _isConnected = false;
+      _connectedController.add(false);
+      print('[SOCKET] Error: $err');
+    });
+
+    _socket!.on('auth:error', (data) {
+      print('[SOCKET] Auth error: $data');
+      // If we get an auth error, we might need to refresh the token or re-login.
+      // For now, let's just push a disconnected state.
       _isConnected = false;
       _connectedController.add(false);
     });
@@ -158,22 +167,32 @@ class SocketService {
 
     // Trip status changed (arrived, in_progress, completed, cancelled)
     _socket!.on('trip:status_update', (data) {
-      _tripStatusController.add(Map<String, dynamic>.from(data));
+      if (data == null) return;
+      try {
+        _tripStatusController.add(Map<String, dynamic>.from(data));
+      } catch (e) {
+        print('[SOCKET] Error processing trip:status_update: $e');
+      }
     });
 
     // Some server paths emit completed directly instead of status_update
     _socket!.on('trip:completed', (data) {
-      final payload = Map<String, dynamic>.from(data);
-      _tripStatusController.add({
-        'tripId': payload['tripId'],
-        'status': 'completed',
-        // Pass through wallet payment info so tracking screen can show correct payment UI
-        if (payload['walletPendingAmount'] != null) 'walletPendingAmount': payload['walletPendingAmount'],
-        if (payload['walletPaidAmount'] != null) 'walletPaidAmount': payload['walletPaidAmount'],
-        if (payload['requiresCashPayment'] != null) 'requiresCashPayment': payload['requiresCashPayment'],
-        if (payload['fare'] != null) 'fare': payload['fare'],
-        if (payload['userPayable'] != null) 'userPayable': payload['userPayable'],
-      });
+      if (data == null) return;
+      try {
+        final payload = Map<String, dynamic>.from(data);
+        _tripStatusController.add({
+          'tripId': payload['tripId'],
+          'status': 'completed',
+          // Pass through wallet payment info so tracking screen can show correct payment UI
+          if (payload['walletPendingAmount'] != null) 'walletPendingAmount': payload['walletPendingAmount'],
+          if (payload['walletPaidAmount'] != null) 'walletPaidAmount': payload['walletPaidAmount'],
+          if (payload['requiresCashPayment'] != null) 'requiresCashPayment': payload['requiresCashPayment'],
+          if (payload['fare'] != null) 'fare': payload['fare'],
+          if (payload['userPayable'] != null) 'userPayable': payload['userPayable'],
+        });
+      } catch (e) {
+        print('[SOCKET] Error processing trip:completed: $e');
+      }
     });
 
     // Trip cancelled by driver
@@ -248,7 +267,12 @@ class SocketService {
     // If socket not ready yet, the connect handler will pick it up via _activeTripId
   }
 
-  void clearActiveTrip() => _activeTripId = null;
+  void stopTrackingTrip(String tripId) {
+    if (_socket != null && _socket!.connected) {
+      _socket!.emit('customer:leave_trip', {'tripId': tripId});
+    }
+    _activeTripId = null;
+  }
 
   // Cancel a trip
   void cancelTrip(String tripId) {

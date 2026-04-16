@@ -20,7 +20,6 @@ import '../chat/trip_chat_sheet.dart';
 
 import '../main_screen.dart';
 import '../booking/booking_screen.dart';
-import '../tip/tip_driver_screen.dart';
 
 class TrackingScreen extends StatefulWidget {
   final String tripId;
@@ -30,23 +29,22 @@ class TrackingScreen extends StatefulWidget {
 }
 
 class _TrackingScreenState extends State<TrackingScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final SocketService _socket = SocketService();
   GoogleMapController? _mapController;
   LatLng _center = const LatLng(17.3850, 78.4867);
   LatLng? _driverLatLng;
   String _status = 'searching';
   Map<String, dynamic>? _trip;
-  Timer? _pollTimer;
   int _rated = 0;
   double _walletPendingAmount =
       0; // amount customer still owes after wallet deduction
   List<String> _cancelReasons = [];
   late AnimationController _pulseCtrl;
   final Set<Marker> _markers = {};
+  final Set<Polyline> _polylines = {};
   final List<StreamSubscription> _subs = [];
   final FlutterTts _tts = FlutterTts();
-  String _lastAnnouncedStatus = '';
   StreamSubscription? _incomingCallSub;
 
   // Booking timeout warning (Feature 1) & Boost Fare (Feature 2)
@@ -56,12 +54,13 @@ class _TrackingScreenState extends State<TrackingScreen>
   final Map<String, BitmapDescriptor> _markerIconCache = {};
   List<Map<String, dynamic>> _nearbyDrivers = [];
 
-  static const Color _blue = Color(0xFF2F7BFF);
-  static const Color _green = JT.primaryDark;
+  bool _isConnected = true;
+  StreamSubscription? _connSub;
+  Timer? _pollTimer;
+
   bool _isArriving = false; // "Pilot is about to arrive" flag
   int _hoveredStars = 0;
   bool _isRatingSubmitted = false;
-  bool _locationWarningShown = false;
 
   // Custom Top Banner state
   String? _bannerMessage;
@@ -71,18 +70,35 @@ class _TrackingScreenState extends State<TrackingScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initTts();
     _pulseCtrl =
         AnimationController(vsync: this, duration: const Duration(seconds: 2))
           ..repeat(reverse: true);
+    _connSub = _socket.onConnectionChanged.listen((connected) {
+      if (mounted) {
+        setState(() => _isConnected = connected);
+        if (!connected) {
+          _showStatusBanner('Waiting for connection...', Colors.orange);
+        } else {
+          _showStatusBanner('Reconnected!', const Color(0xFF10B981));
+          // Re-join trip room on every reconnect
+          _socket.trackTrip(widget.tripId);
+          // Triple poll to reconcile state quickly
+          _pollStatus();
+          Future.delayed(const Duration(milliseconds: 800), _pollStatus);
+          Future.delayed(const Duration(milliseconds: 2500), _pollStatus);
+        }
+      }
+    });
     _connectSocket();
     _pollStatus();
     _loadCancelReasons();
     CallService().init();
     _listenForIncomingCalls();
-    // HTTP polling as fallback (every 3s — socket handles real-time)
-    _pollTimer =
-        Timer.periodic(const Duration(seconds: 5), (_) => _pollStatus());
+    // HTTP polling as fallback — 2s for active states, 4s for in-progress
+    // Socket handles real-time but poll catches missed events and reconciles data
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) => _pollStatus());
     // Start 90-second timeout warning for searching state
     _startSearchTimeoutTimer();
     _startNearbyDriversPolling();
@@ -92,8 +108,6 @@ class _TrackingScreenState extends State<TrackingScreen>
     // Eagerly join the trip room
     _socket.trackTrip(widget.tripId);
 
-    // MOVE LISTENERS OUTSIDE .then() to avoid missing early events
-    // Real-time driver GPS location
     _subs.add(_socket.onDriverLocation.listen((data) {
       if (!mounted) return;
       final lat = double.tryParse(data['lat']?.toString() ?? '');
@@ -103,83 +117,109 @@ class _TrackingScreenState extends State<TrackingScreen>
         setState(() {
           _driverLatLng = LatLng(lat, lng);
           _updateMapMarkers();
+          _fetchRouteForStatus(); // Keep route updated as driver moves
         });
       }
     }));
 
-    // Real-time trip status changes
     _subs.add(_socket.onTripStatus.listen((data) {
-      if (!mounted) return;
-      final newStatus = data['status']?.toString();
-      if (newStatus == null) return;
+      if (data == null) return;
+      try {
+        final newStatus = data['status']?.toString();
+        if (newStatus == null) return;
 
-      // Status rank guard
-      const _statusRank = {
-        'searching': 0, 'driver_assigned': 1, 'accepted': 2, 'arrived': 3, 
-        'in_progress': 4, 'on_the_way': 4, 'completed': 5, 'cancelled': 5
-      };
-      if ((_statusRank[newStatus] ?? 0) < (_statusRank[_status] ?? 0)) return;
+        // Status rank guard: ensure we only move forward in the lifecycle
+        const statusRank = {
+          'searching': 0,
+          'driver_assigned': 1,
+          'accepted': 2,
+          'arrived': 3,
+          'in_progress': 4,
+          'on_the_way': 4,
+          'completed': 5,
+          'cancelled': 5
+        };
+        final incomingRank = statusRank[newStatus] ?? 0;
+        final currentRank = statusRank[_status] ?? 0;
 
-      if (newStatus != _status) {
-        setState(() {
-          _status = newStatus;
-          
-          // If status update contains driver info (newly added to backend), use it
-          final driverData = data['driver'];
-          if (driverData is Map) {
-            final Map<String, dynamic> update = {};
-            final driverMap = Map<String, dynamic>.from(driverData);
-            
-            update['driverId'] = driverMap['id']?.toString();
-            update['driverName'] = driverMap['fullName'] ?? driverMap['full_name'] ?? '';
-            update['driverPhone'] = driverMap['phone'] ?? '';
-            update['driverRating'] = driverMap['rating'] ?? driverMap['avgRating'];
-            update['driverPhoto'] = driverMap['photo'] ?? driverMap['profilePhoto'] ?? '';
-            update['driverVehicleNumber'] = driverMap['vehicleNumber'] ?? driverMap['vehicle_number'] ?? '';
-            update['driverVehicleModel'] = driverMap['vehicleModel'] ?? driverMap['vehicle_model'] ?? '';
-            update['vehicleName'] = driverMap['vehicleCategory'] ?? driverMap['vehicle_category'] ?? '';
-            update['driverLat'] = driverMap['lat'];
-            update['driverLng'] = driverMap['lng'];
-            update['pickupOtp'] = data['otp']?.toString();
-
-            if (_trip != null) {
-              _trip = {..._trip!, ...update};
-            } else {
-              _trip = update;
-            }
-
-            final dLat = double.tryParse(update['driverLat']?.toString() ?? '');
-            final dLng = double.tryParse(update['driverLng']?.toString() ?? '');
-            if (dLat != null && dLng != null && dLat != 0) {
-              _driverLatLng = LatLng(dLat, dLng);
-            }
-          }
-        });
-        
-        // Show banners/announce for specific transitions
-        if (newStatus == 'accepted' || newStatus == 'driver_assigned') {
-           _showStatusBanner('Pilot accepted your ride', JT.primary);
-           _announceStatus('accepted');
-           _updateMapMarkers();
-        } else if (newStatus == 'arrived') {
-           _showStatusBanner('Your pilot is arrived', const Color(0xFF10B981));
-           _announceStatus('arrived');
-        } else if (newStatus == 'in_progress' || newStatus == 'on_the_way') {
-           _animateToDestination();
-           _showStatusBanner('Your ride is started', JT.primary);
-           _announceStatus('started');
-        } else if (newStatus == 'completed') {
-           _showStatusBanner('Your ride is ended', JT.primary);
-           _announceStatus('ended');
-           _pollStatus(); // fetch final fare/wallet
+        if (incomingRank < currentRank) {
+          debugPrint(
+              '[SOCKET] Ignoring stale status update: $newStatus (current: $_status)');
+          return;
         }
 
-        HapticFeedback.mediumImpact();
-      }
+        if (newStatus != _status) {
+          debugPrint('[SOCKET] Trip status transition: $_status -> $newStatus');
+          setState(() {
+            _status = newStatus;
 
-      if (newStatus == 'completed' || newStatus == 'cancelled') {
-        _pollTimer?.cancel();
-        _pollStatus();
+            final Map<String, dynamic> update = {};
+
+            // Merge driver data if present in payload
+            if (data['driver'] is Map) {
+              final driverMap = Map<String, dynamic>.from(data['driver']);
+              update['driverId'] = driverMap['id']?.toString() ??
+                  driverMap['userId']?.toString();
+              update['driverName'] =
+                  driverMap['fullName'] ?? driverMap['full_name'] ?? '';
+              update['driverPhone'] = driverMap['phone'] ?? '';
+              update['driverRating'] =
+                  driverMap['rating'] ?? driverMap['avgRating'];
+              update['driverPhoto'] =
+                  driverMap['photo'] ?? driverMap['profilePhoto'] ?? '';
+              update['driverVehicleNumber'] = driverMap['vehicleNumber'] ??
+                  driverMap['vehicle_number'] ??
+                  '';
+              update['driverVehicleModel'] =
+                  driverMap['vehicleModel'] ?? driverMap['vehicle_model'] ?? '';
+              update['vehicleName'] = driverMap['vehicleCategory'] ??
+                  driverMap['vehicle_category'] ??
+                  '';
+              update['driverLat'] = driverMap['lat'];
+              update['driverLng'] = driverMap['lng'];
+
+              final double? dLat =
+                  double.tryParse(update['driverLat']?.toString() ?? '');
+              final double? dLng =
+                  double.tryParse(update['driverLng']?.toString() ?? '');
+              if (dLat != null && dLng != null && dLat != 0) {
+                _driverLatLng = LatLng(dLat, dLng);
+              }
+            }
+
+            // Merge OTP if present (verify-pickup-otp transition)
+            final String? incomingOtp =
+                data['otp']?.toString() ?? data['pickupOtp']?.toString();
+            if (incomingOtp != null && incomingOtp.isNotEmpty) {
+              update['pickupOtp'] = incomingOtp;
+            }
+
+            if (newStatus == 'completed') {
+              _walletPendingAmount = double.tryParse(
+                      data['walletPendingAmount']?.toString() ??
+                          data['pendingPaymentAmount']?.toString() ??
+                          '0') ??
+                  _walletPendingAmount;
+            }
+
+            _trip = (_trip != null) ? {..._trip!, ...update} : update;
+          });
+
+          // UI transitions & feedback
+          _handleStatusTransition(newStatus);
+          HapticFeedback.lightImpact();
+          // Immediately reconcile — don't wait for next poll tick.
+          _pollStatus();
+          Future.delayed(const Duration(milliseconds: 1500), _pollStatus);
+          Future.delayed(const Duration(milliseconds: 3000), _pollStatus);
+        }
+
+        if (newStatus == 'completed' || newStatus == 'cancelled') {
+          _pollTimer?.cancel();
+          _pollStatus();
+        }
+      } catch (e, stack) {
+        debugPrint('[SOCKET] Error in onTripStatus: $e\n$stack');
       }
     }));
 
@@ -189,23 +229,33 @@ class _TrackingScreenState extends State<TrackingScreen>
       _searchTimeoutTimer?.cancel();
       final driverData = data['driver'];
       final driverId = data['driverId']?.toString();
-      final driverMap = driverData is Map ? Map<String, dynamic>.from(driverData) : null;
-      final pickupOtp = data['pickupOtp']?.toString() ?? data['otp']?.toString();
-      
+      final driverMap =
+          driverData is Map ? Map<String, dynamic>.from(driverData) : null;
+      final pickupOtp =
+          data['pickupOtp']?.toString() ?? data['otp']?.toString();
+
       setState(() {
         _status = data['status'] ?? data['currentStatus'] ?? 'accepted';
         final Map<String, dynamic> update = {};
-        if (pickupOtp != null && pickupOtp.isNotEmpty) update['pickupOtp'] = pickupOtp;
+        if (pickupOtp != null && pickupOtp.isNotEmpty)
+          update['pickupOtp'] = pickupOtp;
         if (driverId != null) update['driverId'] = driverId;
 
         if (driverMap != null) {
-          update['driverName'] = driverMap['fullName'] ?? driverMap['full_name'] ?? '';
+          update['driverName'] =
+              driverMap['fullName'] ?? driverMap['full_name'] ?? '';
           update['driverPhone'] = driverMap['phone'] ?? '';
-          update['driverRating'] = driverMap['rating'] ?? driverMap['avgRating'];
-          update['driverPhoto'] = driverMap['photo'] ?? driverMap['profilePhoto'] ?? '';
-          update['driverVehicleNumber'] = driverMap['vehicleNumber'] ?? driverMap['vehicle_number'] ?? '';
-          update['driverVehicleModel'] = driverMap['vehicleModel'] ?? driverMap['vehicle_model'] ?? '';
-          update['vehicleName'] = driverMap['vehicleCategory'] ?? driverMap['vehicle_category'] ?? '';
+          update['driverRating'] =
+              driverMap['rating'] ?? driverMap['avgRating'];
+          update['driverPhoto'] =
+              driverMap['photo'] ?? driverMap['profilePhoto'] ?? '';
+          update['driverVehicleNumber'] =
+              driverMap['vehicleNumber'] ?? driverMap['vehicle_number'] ?? '';
+          update['driverVehicleModel'] =
+              driverMap['vehicleModel'] ?? driverMap['vehicle_model'] ?? '';
+          update['vehicleName'] = driverMap['vehicleCategory'] ??
+              driverMap['vehicle_category'] ??
+              '';
           update['driverLat'] = driverMap['lat'];
           update['driverLng'] = driverMap['lng'];
         } else if (data['driverName'] != null) {
@@ -231,12 +281,15 @@ class _TrackingScreenState extends State<TrackingScreen>
         _driverLatLng = LatLng(dLat, dLng);
         _updateMapMarkers();
       }
-      
+
       _showStatusBanner('Pilot accepted your ride', JT.primary);
       AlarmService().playChime();
       HapticFeedback.heavyImpact();
       _announceStatus('accepted');
+      // Immediate reconciliation poll to load driver details + route data
       _pollStatus();
+      // Also fetch route using the driver's current location if available
+      if (_driverLatLng != null) _fetchRouteForStatus();
     }));
 
     _subs.add(_socket.onTripCancelled.listen((_) {
@@ -313,7 +366,6 @@ class _TrackingScreenState extends State<TrackingScreen>
     );
   }
 
-
   Future<void> _startNearbyDriversPolling() async {
     _nearbyDriversTimer?.cancel();
     if (!mounted || _status != 'searching') return;
@@ -340,17 +392,22 @@ class _TrackingScreenState extends State<TrackingScreen>
         'lng': pLng.toString(),
         'radius': '3',
       });
-      final r = await http.get(uri, headers: headers).timeout(const Duration(seconds: 5));
+      final r = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 5));
       if (!mounted || r.statusCode != 200) return;
 
       final data = jsonDecode(r.body) as Map<String, dynamic>;
-      final drivers = (data['drivers'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? [];
+      final drivers =
+          (data['drivers'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ??
+              [];
       setState(() => _nearbyDrivers = drivers);
       _updateMapMarkers();
     } catch (_) {}
   }
 
-  Future<BitmapDescriptor> _getMarkerIcon(String type, {bool isSearching = false}) async {
+  Future<BitmapDescriptor> _getMarkerIcon(String type,
+      {bool isSearching = false}) async {
     final key = "${type}_$isSearching";
     if (_markerIconCache.containsKey(key)) return _markerIconCache[key]!;
     final icon = await _drawMarkerIcon(type, isSearching: isSearching);
@@ -358,25 +415,39 @@ class _TrackingScreenState extends State<TrackingScreen>
     return icon;
   }
 
-  Future<BitmapDescriptor> _drawMarkerIcon(String type, {bool isSearching = false}) async {
+  Future<BitmapDescriptor> _drawMarkerIcon(String type,
+      {bool isSearching = false}) async {
     const double size = 110.0;
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, size, size));
 
-    final shadowPaint = Paint()..color = Colors.black.withValues(alpha: 0.18)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7);
-    canvas.drawCircle(const Offset(size / 2, size / 2 + 3), size / 2 - 10, shadowPaint);
+    final shadowPaint = Paint()
+      ..color = Colors.black.withValues(alpha: 0.18)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7);
+    canvas.drawCircle(
+        const Offset(size / 2, size / 2 + 3), size / 2 - 10, shadowPaint);
 
-    final bgPaint = Paint()..color = isSearching ? const Color(0xFF2F7BFF) : const Color(0xFF1E40AF);
+    final bgPaint = Paint()
+      ..color = isSearching ? const Color(0xFF2F7BFF) : const Color(0xFF1E40AF);
     canvas.drawCircle(const Offset(size / 2, size / 2), size / 2 - 12, bgPaint);
 
-    final borderPaint = Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 3;
-    canvas.drawCircle(const Offset(size / 2, size / 2), size / 2 - 12, borderPaint);
+    final borderPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+    canvas.drawCircle(
+        const Offset(size / 2, size / 2), size / 2 - 12, borderPaint);
 
-    final emoji = (type.contains('auto')) ? '🛺' : (type.contains('bike') ? '🏍️' : '🚗');
-    final tp = TextPainter(text: TextSpan(text: emoji, style: const TextStyle(fontSize: 48)), textDirection: TextDirection.ltr)..layout();
+    final emoji =
+        (type.contains('auto')) ? '🛺' : (type.contains('bike') ? '🏍️' : '🚗');
+    final tp = TextPainter(
+        text: TextSpan(text: emoji, style: const TextStyle(fontSize: 48)),
+        textDirection: TextDirection.ltr)
+      ..layout();
     tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
 
-    final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
+    final img =
+        await recorder.endRecording().toImage(size.toInt(), size.toInt());
     final data = await img.toByteData(format: ui.ImageByteFormat.png);
     return BitmapDescriptor.bytes(data!.buffer.asUint8List());
   }
@@ -386,18 +457,186 @@ class _TrackingScreenState extends State<TrackingScreen>
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, size, size));
     final paint = Paint()..color = const Color(0xFF2F7BFF);
-    canvas.drawCircle(const Offset(size / 2, size / 2), size / 2 - 10, paint..style = PaintingStyle.fill);
-    canvas.drawCircle(const Offset(size / 2, size / 2), size / 2 - 10, Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 4);
-    final tp = TextPainter(text: const TextSpan(text: '🔍', style: TextStyle(fontSize: 40)), textDirection: TextDirection.ltr)..layout();
+    canvas.drawCircle(const Offset(size / 2, size / 2), size / 2 - 10,
+        paint..style = PaintingStyle.fill);
+    canvas.drawCircle(
+        const Offset(size / 2, size / 2),
+        size / 2 - 10,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4);
+    final tp = TextPainter(
+        text: const TextSpan(text: '🔍', style: TextStyle(fontSize: 40)),
+        textDirection: TextDirection.ltr)
+      ..layout();
     tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
-    final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
+    final img =
+        await recorder.endRecording().toImage(size.toInt(), size.toInt());
     final data = await img.toByteData(format: ui.ImageByteFormat.png);
     return BitmapDescriptor.bytes(data!.buffer.asUint8List());
   }
 
+  void _handleStatusTransition(String newStatus) {
+    if (newStatus == 'accepted' || newStatus == 'driver_assigned') {
+      _showStatusBanner('Pilot accepted your ride', JT.primary);
+      _announceStatus('accepted');
+      _updateMapMarkers();
+    } else if (newStatus == 'arrived') {
+      _showStatusBanner('Your pilot has arrived', const Color(0xFF10B981));
+      _announceStatus('arrived');
+      _updateMapMarkers();
+    } else if (newStatus == 'in_progress' || newStatus == 'on_the_way') {
+      _animateToDestination();
+      _showStatusBanner('Ride started • Have a safe journey!', JT.primary);
+      _fetchRouteForStatus();
+      _updateMapMarkers();
+    } else if (newStatus == 'completed') {
+      _showStatusBanner('Trip Completed • Thank you!', const Color(0xFF10B981));
+      setState(() => _polylines.clear());
+      _updateMapMarkers();
+    } else if (newStatus == 'cancelled') {
+      _showStatusBanner('Trip Cancelled', const Color(0xFFDC2626));
+      setState(() => _polylines.clear());
+    }
+  }
+
+  // ── Polyline & Routing ────────────────────────────────────────────────────
+
+  List<LatLng> _decodePolyline(String encoded) {
+    final List<LatLng> pts = [];
+    int index = 0;
+    int lat = 0, lng = 0;
+    while (index < encoded.length) {
+      int b, shift = 0, result = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      final dLat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lat += dLat;
+      shift = 0;
+      result = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      final dLng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lng += dLng;
+      pts.add(LatLng(lat / 1e5, lng / 1e5));
+    }
+    return pts;
+  }
+
+  Future<void> _fetchRouteForStatus() async {
+    if (_driverLatLng == null || _trip == null) return;
+
+    // Status rank: search=0, assigned/accepted=1/2, arrived=3, on_the_way=4
+    final isGoingToPickup = _status == 'accepted' ||
+        _status == 'driver_assigned' ||
+        _status == 'arrived';
+    final isGoingToDrop = _status == 'in_progress' || _status == 'on_the_way';
+
+    if (!isGoingToPickup && !isGoingToDrop) {
+      if (_polylines.isNotEmpty) setState(() => _polylines.clear());
+      return;
+    }
+
+    double destLat, destLng;
+    if (isGoingToPickup) {
+      destLat = double.tryParse(_trip?['pickupLat']?.toString() ?? '') ?? 0.0;
+      destLng = double.tryParse(_trip?['pickupLng']?.toString() ?? '') ?? 0.0;
+    } else {
+      destLat =
+          double.tryParse(_trip?['destinationLat']?.toString() ?? '') ?? 0.0;
+      destLng =
+          double.tryParse(_trip?['destinationLng']?.toString() ?? '') ?? 0.0;
+    }
+
+    if (destLat == 0 || destLng == 0) return;
+
+    // Fetch route from driver to target
+    await _fetchRoute(
+        _driverLatLng!.latitude, _driverLatLng!.longitude, destLat, destLng);
+  }
+
+  Future<void> _fetchRoute(
+      double fromLat, double fromLng, double toLat, double toLng) async {
+    try {
+      final headers = await AuthService.getHeaders();
+      final res = await http
+          .post(
+            Uri.parse(ApiConfig.routeMultiWaypoint),
+            headers: {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'origin': {'lat': fromLat, 'lng': fromLng},
+              'destination': {'lat': toLat, 'lng': toLng},
+              'waypoints': [],
+              'optimize': false,
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final overviewPolyline = data['overviewPolyline']?.toString();
+        if (overviewPolyline != null && mounted) {
+          final pts = _decodePolyline(overviewPolyline);
+          setState(() {
+            _polylines.clear();
+            _polylines.add(Polyline(
+              polylineId: const PolylineId('route'),
+              points: pts,
+              color: JT.primary,
+              width: 5,
+              jointType: JointType.round,
+              startCap: Cap.roundCap,
+              endCap: Cap.roundCap,
+            ));
+          });
+
+          // Fit markers and route in view if significant movement occurred
+          _fitMarkersToScreen();
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _fitMarkersToScreen() {
+    if (_mapController == null || _driverLatLng == null) return;
+
+    final pLat = double.tryParse(_trip?['pickupLat']?.toString() ?? '') ?? 0.0;
+    final pLng = double.tryParse(_trip?['pickupLng']?.toString() ?? '') ?? 0.0;
+    final dLat =
+        double.tryParse(_trip?['destinationLat']?.toString() ?? '') ?? 0.0;
+    final dLng =
+        double.tryParse(_trip?['destinationLng']?.toString() ?? '') ?? 0.0;
+
+    double targetLat =
+        (_status == 'in_progress' || _status == 'on_the_way') ? dLat : pLat;
+    double targetLng =
+        (_status == 'in_progress' || _status == 'on_the_way') ? dLng : pLng;
+
+    if (targetLat == 0) return;
+
+    final bounds = LatLngBounds(
+      southwest: LatLng(
+        math.min(_driverLatLng!.latitude, targetLat),
+        math.min(_driverLatLng!.longitude, targetLng),
+      ),
+      northeast: LatLng(
+        math.max(_driverLatLng!.latitude, targetLat),
+        math.max(_driverLatLng!.longitude, targetLng),
+      ),
+    );
+    _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 120));
+  }
+
   void _updateMapMarkers() async {
     final Set<Marker> newMarkers = {};
-    
+
     // 1. Pickup Location Marker (Search center)
     final pLat = double.tryParse(_trip?['pickupLat']?.toString() ?? '');
     final pLng = double.tryParse(_trip?['pickupLng']?.toString() ?? '');
@@ -414,7 +653,9 @@ class _TrackingScreenState extends State<TrackingScreen>
     }
 
     // 2. Assigned Driver Marker
-    if (_driverLatLng != null && _status != 'searching' && _status != 'completed' && _status != 'cancelled') {
+    if (_driverLatLng != null &&
+        _status != 'searching' &&
+        _status != 'cancelled') {
       final vName = (_trip?['vehicleName'] ?? 'Pilot').toString();
       newMarkers.add(Marker(
         markerId: const MarkerId('driver'),
@@ -422,19 +663,31 @@ class _TrackingScreenState extends State<TrackingScreen>
         icon: await _getMarkerIcon(vName),
         anchor: const Offset(0.5, 0.5),
       ));
-      _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_driverLatLng!, 16));
+      if (_status != 'completed') {
+        _mapController
+            ?.animateCamera(CameraUpdate.newLatLngZoom(_driverLatLng!, 16));
+      }
     }
 
-    // 3. Destination Marker (visible only during trip)
-    final dLat = double.tryParse(_trip?['destinationLat']?.toString() ?? _trip?['destination_lat']?.toString() ?? '');
-    final dLng = double.tryParse(_trip?['destinationLng']?.toString() ?? _trip?['destination_lng']?.toString() ?? '');
-    if (dLat != null && dLng != null && dLat != 0 && (_status == 'in_progress' || _status == 'on_the_way')) {
+    // 3. Destination Marker (visible during and after trip)
+    final dLat = double.tryParse(_trip?['destinationLat']?.toString() ??
+        _trip?['destination_lat']?.toString() ??
+        '');
+    final dLng = double.tryParse(_trip?['destinationLng']?.toString() ??
+        _trip?['destination_lng']?.toString() ??
+        '');
+    if (dLat != null &&
+        dLng != null &&
+        dLat != 0 &&
+        (_status == 'in_progress' ||
+            _status == 'on_the_way' ||
+            _status == 'completed')) {
       newMarkers.add(Marker(
         markerId: const MarkerId('destination'),
         position: LatLng(dLat, dLng),
         icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
       ));
-      
+
       if (_driverLatLng != null && _mapController != null) {
         final bounds = LatLngBounds(
           southwest: LatLng(
@@ -446,7 +699,8 @@ class _TrackingScreenState extends State<TrackingScreen>
             _driverLatLng!.longitude > dLng ? _driverLatLng!.longitude : dLng,
           ),
         );
-        _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100));
+        _mapController
+            ?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100));
       }
     }
 
@@ -457,7 +711,8 @@ class _TrackingScreenState extends State<TrackingScreen>
         final dLng = double.tryParse(d['lng']?.toString() ?? '');
         if (dLat == null || dLng == null) continue;
         final id = d['id']?.toString() ?? '';
-        final vName = (d['vehicleCategoryName'] ?? d['vehicleName'] ?? 'bike').toString();
+        final vName =
+            (d['vehicleCategoryName'] ?? d['vehicleName'] ?? 'bike').toString();
         newMarkers.add(Marker(
           markerId: MarkerId('nearby_$id'),
           position: LatLng(dLat, dLng),
@@ -476,34 +731,42 @@ class _TrackingScreenState extends State<TrackingScreen>
   }
 
   void _checkArrivingStatus(double dLat, double dLng) {
-    if (_status != 'accepted' && _status != 'driver_assigned' && _status != 'arrived') return;
-    
+    if (_status != 'accepted' &&
+        _status != 'driver_assigned' &&
+        _status != 'arrived') return;
+
     final pLat = double.tryParse(_trip?['pickupLat']?.toString() ?? '');
     final pLng = double.tryParse(_trip?['pickupLng']?.toString() ?? '');
     if (pLat == null || pLng == null) return;
 
-    final double dist = _calculateDistance(dLat, dLng, pLat, pLng); // result in km
-    
+    final double dist =
+        _calculateDistance(dLat, dLng, pLat, pLng); // result in km
+
     // If within 500 meters and not already marked as arriving
     if (dist < 0.5 && !_isArriving && _status != 'arrived') {
       setState(() => _isArriving = true);
-      _announceStatus('arriving');
+      // _announceStatus('arriving');
       HapticFeedback.mediumImpact();
     } else if (dist >= 0.5 && _isArriving) {
       setState(() => _isArriving = false);
     }
   }
 
-  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+  double _calculateDistance(
+      double lat1, double lon1, double lat2, double lon2) {
     const double p = 0.017453292519943295;
-    final double a = 0.5 - math.cos((lat2 - lat1) * p) / 2 +
-        math.cos(lat1 * p) * math.cos(lat2 * p) *
-        (1 - math.cos((lon2 - lon1) * p)) / 2;
+    final double a = 0.5 -
+        math.cos((lat2 - lat1) * p) / 2 +
+        math.cos(lat1 * p) *
+            math.cos(lat2 * p) *
+            (1 - math.cos((lon2 - lon1) * p)) /
+            2;
     return 12742 * math.asin(math.sqrt(a));
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final s in _subs) s.cancel();
     _incomingCallSub?.cancel();
     _pollTimer?.cancel();
@@ -512,6 +775,17 @@ class _TrackingScreenState extends State<TrackingScreen>
     _tts.stop();
     // Don't disconnect socket — it's a shared singleton
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (!_socket.isConnected) {
+        _socket.connect(ApiConfig.socketUrl);
+      }
+      _socket.trackTrip(widget.tripId);
+      _pollStatus();
+    }
   }
 
   void _listenForIncomingCalls() {
@@ -542,6 +816,8 @@ class _TrackingScreenState extends State<TrackingScreen>
   }
 
   Future<void> _announceStatus(String status) async {
+    /* 
+    // Temporarily disabled to troubleshoot "Lost connection" crash on Android
     if (status == _lastAnnouncedStatus) return;
     _lastAnnouncedStatus = status;
     String? message;
@@ -572,6 +848,7 @@ class _TrackingScreenState extends State<TrackingScreen>
       await _tts.stop();
       await _tts.speak(message);
     } catch (_) {}
+    */
   }
 
   // ── Feature 1: Booking Timeout Warning ────────────────────────────────────
@@ -593,22 +870,28 @@ class _TrackingScreenState extends State<TrackingScreen>
         backgroundColor: Colors.white,
         title: Row(children: [
           Container(
-            width: 40, height: 40,
+            width: 40,
+            height: 40,
             decoration: BoxDecoration(
               color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.timer_outlined, color: Color(0xFFF59E0B), size: 22),
+            child: const Icon(Icons.timer_outlined,
+                color: Color(0xFFF59E0B), size: 22),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Text('Search is taking long',
-              style: GoogleFonts.poppins(fontSize: 15, fontWeight: FontWeight.w500, color: JT.textPrimary)),
+                style: GoogleFonts.poppins(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                    color: JT.textPrimary)),
           ),
         ]),
         content: Text(
           'We haven\'t found a pilot yet. You can boost your fare to attract more drivers, or cancel the trip.',
-          style: GoogleFonts.poppins(fontSize: 13, color: const Color(0xFF6B7280), height: 1.5),
+          style: GoogleFonts.poppins(
+              fontSize: 13, color: const Color(0xFF6B7280), height: 1.5),
         ),
         actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actionsAlignment: MainAxisAlignment.spaceBetween,
@@ -619,7 +902,10 @@ class _TrackingScreenState extends State<TrackingScreen>
               _showCancelDialog();
             },
             child: Text('Cancel Trip',
-              style: GoogleFonts.poppins(color: const Color(0xFFDC2626), fontWeight: FontWeight.w400, fontSize: 13)),
+                style: GoogleFonts.poppins(
+                    color: const Color(0xFFDC2626),
+                    fontWeight: FontWeight.w400,
+                    fontSize: 13)),
           ),
           ElevatedButton.icon(
             onPressed: () {
@@ -627,11 +913,14 @@ class _TrackingScreenState extends State<TrackingScreen>
               _showBoostFareSheet();
             },
             icon: const Icon(Icons.bolt_rounded, size: 16),
-            label: Text('Boost Fare', style: GoogleFonts.poppins(fontWeight: FontWeight.w500, fontSize: 13)),
+            label: Text('Boost Fare',
+                style: GoogleFonts.poppins(
+                    fontWeight: FontWeight.w500, fontSize: 13)),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF2F7BFF),
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             ),
           ),
@@ -659,12 +948,16 @@ class _TrackingScreenState extends State<TrackingScreen>
             const Icon(Icons.bolt_rounded, color: Colors.white, size: 16),
             const SizedBox(width: 8),
             Text('Fare boosted by ₹$amount! Searching for pilots...',
-              style: GoogleFonts.poppins(color: Colors.white, fontWeight: FontWeight.w400, fontSize: 13)),
+                style: GoogleFonts.poppins(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w400,
+                    fontSize: 13)),
           ]),
           backgroundColor: const Color(0xFF2F7BFF),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           duration: const Duration(seconds: 4),
         ));
         // Restart the 90s timer after boost
@@ -672,23 +965,26 @@ class _TrackingScreenState extends State<TrackingScreen>
       } else {
         final err = jsonDecode(res.body);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(err['message']?.toString() ?? 'Boost failed. Try again.',
-            style: GoogleFonts.poppins(color: Colors.white, fontSize: 13)),
+          content: Text(
+              err['message']?.toString() ?? 'Boost failed. Try again.',
+              style: GoogleFonts.poppins(color: Colors.white, fontSize: 13)),
           backgroundColor: const Color(0xFFDC2626),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ));
       }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Network error. Try again.',
-            style: GoogleFonts.poppins(color: Colors.white, fontSize: 13)),
+              style: GoogleFonts.poppins(color: Colors.white, fontSize: 13)),
           backgroundColor: const Color(0xFFDC2626),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ));
       }
     }
@@ -704,31 +1000,46 @@ class _TrackingScreenState extends State<TrackingScreen>
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 30)],
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withValues(alpha: 0.15), blurRadius: 30)
+          ],
         ),
         padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Container(
-            width: 44, height: 4,
-            decoration: BoxDecoration(color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(2)),
+            width: 44,
+            height: 4,
+            decoration: BoxDecoration(
+                color: const Color(0xFFE5E7EB),
+                borderRadius: BorderRadius.circular(2)),
           ),
           const SizedBox(height: 20),
           Row(children: [
             Container(
-              width: 48, height: 48,
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
                 color: const Color(0xFF2F7BFF).withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.bolt_rounded, color: Color(0xFF2F7BFF), size: 24),
+              child: const Icon(Icons.bolt_rounded,
+                  color: Color(0xFF2F7BFF), size: 24),
             ),
             const SizedBox(width: 14),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Boost Your Fare',
-                style: GoogleFonts.poppins(fontSize: 17, fontWeight: FontWeight.w500, color: JT.textPrimary)),
-              Text('Add extra to attract more pilots',
-                style: GoogleFonts.poppins(fontSize: 12, color: const Color(0xFF6B7280))),
-            ])),
+            Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  Text('Boost Your Fare',
+                      style: GoogleFonts.poppins(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w500,
+                          color: JT.textPrimary)),
+                  Text('Add extra to attract more pilots',
+                      style: GoogleFonts.poppins(
+                          fontSize: 12, color: const Color(0xFF6B7280))),
+                ])),
           ]),
           const SizedBox(height: 22),
           Row(children: [
@@ -740,8 +1051,9 @@ class _TrackingScreenState extends State<TrackingScreen>
           ]),
           const SizedBox(height: 10),
           Text('Boost amount will be added to the trip fare',
-            style: GoogleFonts.poppins(color: const Color(0xFF9CA3AF), fontSize: 11),
-            textAlign: TextAlign.center),
+              style: GoogleFonts.poppins(
+                  color: const Color(0xFF9CA3AF), fontSize: 11),
+              textAlign: TextAlign.center),
         ]),
       ),
     );
@@ -750,26 +1062,39 @@ class _TrackingScreenState extends State<TrackingScreen>
   Widget _buildBoostOption(int amount) {
     return Expanded(
       child: GestureDetector(
-        onTap: _boostLoading ? null : () {
-          Navigator.pop(context);
-          _boostFare(amount);
-        },
+        onTap: _boostLoading
+            ? null
+            : () {
+                Navigator.pop(context);
+                _boostFare(amount);
+              },
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 18),
           decoration: BoxDecoration(
             gradient: LinearGradient(
               colors: [const Color(0xFF2F7BFF), const Color(0xFF1A5FCC)],
-              begin: Alignment.topLeft, end: Alignment.bottomRight,
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
             ),
             borderRadius: BorderRadius.circular(16),
-            boxShadow: [BoxShadow(color: const Color(0xFF2F7BFF).withValues(alpha: 0.3), blurRadius: 12, offset: const Offset(0, 4))],
+            boxShadow: [
+              BoxShadow(
+                  color: const Color(0xFF2F7BFF).withValues(alpha: 0.3),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4))
+            ],
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             const Icon(Icons.bolt_rounded, color: Colors.white, size: 20),
             const SizedBox(height: 4),
             Text('₹$amount',
-              style: GoogleFonts.poppins(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500)),
-            Text('Boost', style: GoogleFonts.poppins(color: Colors.white70, fontSize: 10)),
+                style: GoogleFonts.poppins(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500)),
+            Text('Boost',
+                style:
+                    GoogleFonts.poppins(color: Colors.white70, fontSize: 10)),
           ]),
         ),
       ),
@@ -793,27 +1118,27 @@ class _TrackingScreenState extends State<TrackingScreen>
   }
 
   Future<void> _pollStatus() async {
+    if (!mounted) return;
     try {
       final headers = await AuthService.getHeaders();
-      final res = await http.get(
-        Uri.parse('${ApiConfig.trackTrip}/${widget.tripId}'),
-        headers: headers,
-      );
+      final res = await http
+          .get(
+            Uri.parse('${ApiConfig.trackTrip}/${widget.tripId}'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (!mounted) return;
+
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         final trip = data['trip'];
-        if (trip != null && mounted) {
-          final dLat = double.tryParse(trip['driverLat']?.toString() ?? '');
-          final dLng = double.tryParse(trip['driverLng']?.toString() ?? '');
-          final rawStatus = trip['currentStatus'] ?? _status;
-          // payment_pending = driver completed but payment not yet confirmed — show as completed on user side
+        if (trip != null) {
+          final rawStatus = trip['currentStatus']?.toString() ?? _status;
           final resolvedStatus =
               rawStatus == 'payment_pending' ? 'completed' : rawStatus;
 
-          // Status priority guard: the trip lifecycle is strictly one-way.
-          // Never let HTTP poll downgrade a status that was already advanced by a
-          // faster socket event (e.g. 'searching' from HTTP must not revert 'accepted').
-          const _statusRank = {
+          const statusRank = {
             'searching': 0,
             'driver_assigned': 1,
             'accepted': 2,
@@ -823,30 +1148,38 @@ class _TrackingScreenState extends State<TrackingScreen>
             'completed': 5,
             'cancelled': 5,
           };
-          final currentRank = _statusRank[_status] ?? 0;
-          final incomingRank = _statusRank[resolvedStatus] ?? 0;
 
-          // Only update local state if HTTP reports a status at least as advanced as what we have.
-          // This prevents a stale 'searching' response from the DB from wiping out an 'accepted'
-          // state that was already set by a fast socket event.
+          final currentRank = statusRank[_status] ?? 0;
+          final incomingRank = statusRank[resolvedStatus] ?? 0;
+
           if (incomingRank >= currentRank) {
             setState(() {
-              // DATA PRESERVATION: Keep existing driver details if HTTP response is missing them
-              // (Wait for DB to catch up with joined driver info)
-              if (_trip != null && trip != null) {
+              // Preserve existing critical data if missing in poll
+              if (_trip != null) {
                 final List<String> criticalKeys = [
-                  'driverName', 'driverPhone', 'driverRating', 'driverPhoto',
-                  'driverVehicleNumber', 'driverVehicleModel', 'vehicleName',
-                  'driverLat', 'driverLng', 'pickupOtp'
+                  'driverName',
+                  'driverPhone',
+                  'driverRating',
+                  'driverPhoto',
+                  'driverVehicleNumber',
+                  'driverVehicleModel',
+                  'vehicleName',
+                  'driverLat',
+                  'driverLng',
+                  'pickupOtp',
+                  'destinationAddress',
+                  'pickupAddress'
                 ];
                 for (var key in criticalKeys) {
                   if ((trip[key] == null || trip[key].toString().isEmpty) &&
-                      (_trip![key] != null && _trip![key].toString().isNotEmpty)) {
+                      (_trip![key] != null &&
+                          _trip![key].toString().isNotEmpty)) {
                     trip[key] = _trip![key];
                   }
                 }
               }
 
+              final bool statusChanged = _status != resolvedStatus;
               _trip = trip;
               _status = resolvedStatus;
 
@@ -858,35 +1191,32 @@ class _TrackingScreenState extends State<TrackingScreen>
                     ) ??
                     _walletPendingAmount;
               }
+
+              if (statusChanged) {
+                _handleStatusTransition(resolvedStatus);
+              }
             });
           }
 
+          final dLat = double.tryParse(trip['driverLat']?.toString() ?? '');
+          final dLng = double.tryParse(trip['driverLng']?.toString() ?? '');
           if (dLat != null && dLng != null && dLat != 0) {
             _driverLatLng = LatLng(dLat, dLng);
             _updateMapMarkers();
-          }
-
-          // Update map to pickup position
-          final pLat = double.tryParse(trip['pickupLat']?.toString() ?? '');
-          final pLng = double.tryParse(trip['pickupLng']?.toString() ?? '');
-          if (pLat != null && pLng != null && pLat != 0) {
-            _center = LatLng(pLat, pLng);
-            // Animate camera only when driver is not yet assigned (searching state)
-            if (_status == 'searching') {
-              _mapController?.animateCamera(CameraUpdate.newLatLng(_center));
-            }
           }
 
           if (_status == 'completed' || _status == 'cancelled') {
             _pollTimer?.cancel();
           }
         }
-      } else if (res.statusCode == 404 &&
-          mounted &&
-          (_status == 'completed' || _status == 'cancelled')) {
-        _pollTimer?.cancel();
+      } else if (res.statusCode == 401) {
+        debugPrint('[POLL] Session expired (401) during trip tracking');
+        // We DON'T redirect to login here to avoid kicking out a tracking user.
+        // The socket will likely still keep them updated.
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[POLL] Network error in status sync: $e');
+    }
   }
 
   Future<void> _cancelTrip(String reason) async {
@@ -902,13 +1232,14 @@ class _TrackingScreenState extends State<TrackingScreen>
               {'tripId': _trip?['id'] ?? widget.tripId, 'reason': reason}));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
-        walletRefund =
-            double.tryParse(data['walletRefund']?.toString() ?? '');
+        walletRefund = double.tryParse(data['walletRefund']?.toString() ?? '');
       }
     } catch (_) {}
     if (!mounted) return;
     if (walletRefund != null && walletRefund > 0) {
-      _showStatusBanner('₹${walletRefund.toStringAsFixed(0)} refunded to your wallet', JT.primary);
+      _showStatusBanner(
+          '₹${walletRefund.toStringAsFixed(0)} refunded to your wallet',
+          JT.primary);
       await Future.delayed(const Duration(seconds: 2));
     }
     if (!mounted) return;
@@ -993,7 +1324,6 @@ class _TrackingScreenState extends State<TrackingScreen>
 
   @override
   Widget build(BuildContext context) {
-
     final statusInfo = _getStatusInfo(_status);
     final trip = _trip;
     final otp =
@@ -1011,7 +1341,18 @@ class _TrackingScreenState extends State<TrackingScreen>
     final panelBg = JT.surface;
 
     return PopScope(
-      canPop: _status == 'completed' || _status == 'cancelled',
+      canPop: false, // Prevent all back gestures/buttons during active tracking
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_status == 'completed' || _status == 'cancelled') {
+          Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const MainScreen()),
+              (_) => false);
+        } else {
+          // Show a hint that they can't leave
+          _showStatusBanner('Active trip in progress', JT.primary);
+        }
+      },
       child: Scaffold(
         backgroundColor: JT.bg,
         body: Stack(children: [
@@ -1019,15 +1360,22 @@ class _TrackingScreenState extends State<TrackingScreen>
             initialCameraPosition: CameraPosition(target: _center, zoom: 15),
             onMapCreated: (c) {
               _mapController = c;
-              if (_driverLatLng != null) _updateMapMarkers();
+              if (_driverLatLng != null) {
+                _updateMapMarkers();
+                _fetchRouteForStatus();
+              }
             },
             markers: _markers,
+            polylines: _polylines,
             circles: {
               if (_status == 'searching' && _trip != null)
                 Circle(
                   circleId: const CircleId('search_radius'),
-                  center: LatLng(double.tryParse(_trip?['pickupLat']?.toString() ?? '0') ?? 0, 
-                                 double.tryParse(_trip?['pickupLng']?.toString() ?? '0') ?? 0),
+                  center: LatLng(
+                      double.tryParse(_trip?['pickupLat']?.toString() ?? '0') ??
+                          0,
+                      double.tryParse(_trip?['pickupLng']?.toString() ?? '0') ??
+                          0),
                   radius: 400,
                   fillColor: const Color(0xFF2F7BFF).withValues(alpha: 0.05),
                   strokeColor: const Color(0xFF2F7BFF).withValues(alpha: 0.3),
@@ -1071,9 +1419,8 @@ class _TrackingScreenState extends State<TrackingScreen>
                         children: [
                           _buildPremiumHeader(statusInfo, otp),
                           const SizedBox(height: 14),
-                          
                           if (_status != 'searching') ...[
-                            if (driverName != null) 
+                            if (driverName != null)
                               _buildPremiumDriverCard(
                                 name: driverName,
                                 rating: driverRating,
@@ -1083,9 +1430,11 @@ class _TrackingScreenState extends State<TrackingScreen>
                                 phone: driverPhone,
                               )
                             else
-                              const Center(child: Padding(
+                              const Center(
+                                  child: Padding(
                                 padding: EdgeInsets.symmetric(vertical: 20),
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
                               )),
                             const SizedBox(height: 16),
                             if (driverName != null) ...[
@@ -1093,12 +1442,13 @@ class _TrackingScreenState extends State<TrackingScreen>
                               const SizedBox(height: 16),
                             ],
                           ] else if (_status == 'searching') ...[
-                             _buildSearchingIndicator(statusInfo['color'] as Color),
-                             const SizedBox(height: 16),
+                            _buildSearchingIndicator(
+                                statusInfo['color'] as Color),
+                            const SizedBox(height: 16),
                           ],
-
                           if (trip != null) ...[
-                            if (_status == 'in_progress' || _status == 'on_the_way')
+                            if (_status == 'in_progress' ||
+                                _status == 'on_the_way')
                               _buildInProgressPanel(trip)
                             else ...[
                               _buildFareRow(trip, actualFare, estimatedFare),
@@ -1111,14 +1461,18 @@ class _TrackingScreenState extends State<TrackingScreen>
                           ] else if (_status == 'cancelled') ...[
                             const SizedBox(height: 16),
                             _buildCancelledCard(),
-                          ] else ... [
+                          ] else ...[
                             const SizedBox(height: 20),
                             Center(
                               child: TextButton.icon(
                                 onPressed: _showCancelDialog,
-                                icon: const Icon(Icons.close_rounded, size: 16, color: Color(0xFF64748B)),
+                                icon: const Icon(Icons.close_rounded,
+                                    size: 16, color: Color(0xFF64748B)),
                                 label: const Text('Cancel Ride',
-                                  style: TextStyle(color: Color(0xFF64748B), fontSize: 13, fontWeight: FontWeight.w500)),
+                                    style: TextStyle(
+                                        color: Color(0xFF64748B),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500)),
                               ),
                             ),
                           ],
@@ -1145,7 +1499,8 @@ class _TrackingScreenState extends State<TrackingScreen>
   }
 
   void _startInAppCall(String driverName) {
-    final driverId = _trip?['driverId']?.toString() ?? _trip?['driver_id']?.toString();
+    final driverId =
+        _trip?['driverId']?.toString() ?? _trip?['driver_id']?.toString();
     if (driverId != null && driverId.isNotEmpty) {
       Navigator.of(context).push(MaterialPageRoute(
         builder: (_) => CallScreen(
@@ -1155,19 +1510,20 @@ class _TrackingScreenState extends State<TrackingScreen>
         ),
       ));
     } else if ((_trip?['driverPhone'] ?? _trip?['driver_phone']) != null) {
-      launchUrl(Uri.parse('tel:${_trip!['driverPhone'] ?? _trip!['driver_phone']}'));
+      launchUrl(
+          Uri.parse('tel:${_trip!['driverPhone'] ?? _trip!['driver_phone']}'));
     }
   }
 
   void _openTripChat() {
     showModalBottomSheet(
-       context: context,
-       isScrollControlled: true,
-       backgroundColor: Colors.transparent,
-       builder: (_) => TripChatSheet(
-         tripId: widget.tripId,
-         senderName: 'Customer',
-       ),
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => TripChatSheet(
+        tripId: widget.tripId,
+        senderName: 'Customer',
+      ),
     );
   }
 
@@ -1186,10 +1542,13 @@ class _TrackingScreenState extends State<TrackingScreen>
 
   Widget _buildPremiumHeader(Map<String, dynamic> statusInfo, String? otp) {
     final color = statusInfo['color'] as Color;
-    final showOtp = otp != null && otp.isNotEmpty && 
-                    (_status == 'driver_assigned' || _status == 'accepted' || _status == 'arrived');
+    final showOtp = otp != null &&
+        otp.isNotEmpty &&
+        (_status == 'driver_assigned' ||
+            _status == 'accepted' ||
+            _status == 'arrived');
     final eta = _trip?['etaMinutes']?.toString() ?? '5';
-    
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1208,7 +1567,9 @@ class _TrackingScreenState extends State<TrackingScreen>
                       color: const Color(0xFF0F172A),
                     ),
                   ),
-                  if (_status != 'completed' && _status != 'cancelled' && _status != 'searching')
+                  if (_status != 'completed' &&
+                      _status != 'cancelled' &&
+                      _status != 'searching')
                     Text(
                       'Live tracking active • SECURE PIN',
                       style: GoogleFonts.poppins(
@@ -1220,7 +1581,9 @@ class _TrackingScreenState extends State<TrackingScreen>
                 ],
               ),
             ),
-            if (_status != 'searching' && _status != 'completed' && _status != 'cancelled')
+            if (_status != 'searching' &&
+                _status != 'completed' &&
+                _status != 'cancelled')
               IconButton(
                 onPressed: _shareRide,
                 icon: Container(
@@ -1229,7 +1592,8 @@ class _TrackingScreenState extends State<TrackingScreen>
                     color: const Color(0xFFF1F5F9),
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.share_rounded, size: 18, color: Color(0xFF475569)),
+                  child: const Icon(Icons.share_rounded,
+                      size: 18, color: Color(0xFF475569)),
                 ),
               ),
           ],
@@ -1241,7 +1605,8 @@ class _TrackingScreenState extends State<TrackingScreen>
               // PIN Card
               Expanded(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(16),
@@ -1255,14 +1620,24 @@ class _TrackingScreenState extends State<TrackingScreen>
                           color: const Color(0xFF6366F1).withValues(alpha: 0.1),
                           shape: BoxShape.circle,
                         ),
-                        child: const Icon(Icons.stars_rounded, color: Color(0xFF6366F1), size: 18),
+                        child: const Icon(Icons.stars_rounded,
+                            color: Color(0xFF6366F1), size: 18),
                       ),
                       const SizedBox(width: 12),
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('PIN', style: GoogleFonts.poppins(fontSize: 11, fontWeight: FontWeight.w600, color: const Color(0xFF94A3B8))),
-                          Text(otp, style: GoogleFonts.poppins(fontSize: 22, fontWeight: FontWeight.w800, color: const Color(0xFF0F172A), letterSpacing: 1)),
+                          Text('PIN',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: const Color(0xFF94A3B8))),
+                          Text(otp,
+                              style: GoogleFonts.poppins(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w800,
+                                  color: const Color(0xFF0F172A),
+                                  letterSpacing: 1)),
                         ],
                       ),
                     ],
@@ -1273,7 +1648,8 @@ class _TrackingScreenState extends State<TrackingScreen>
               // Wait Time Card
               Expanded(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(16),
@@ -1287,14 +1663,23 @@ class _TrackingScreenState extends State<TrackingScreen>
                           color: const Color(0xFF10B981).withValues(alpha: 0.1),
                           shape: BoxShape.circle,
                         ),
-                        child: const Icon(Icons.timer_rounded, color: Color(0xFF10B981), size: 18),
+                        child: const Icon(Icons.timer_rounded,
+                            color: Color(0xFF10B981), size: 18),
                       ),
                       const SizedBox(width: 12),
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('WAIT TIME', style: GoogleFonts.poppins(fontSize: 11, fontWeight: FontWeight.w600, color: const Color(0xFF94A3B8))),
-                          Text('$eta MIN', style: GoogleFonts.poppins(fontSize: 20, fontWeight: FontWeight.w800, color: const Color(0xFF0F172A))),
+                          Text('WAIT TIME',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: const Color(0xFF94A3B8))),
+                          Text('$eta MIN',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w800,
+                                  color: const Color(0xFF0F172A))),
                         ],
                       ),
                     ],
@@ -1332,11 +1717,13 @@ class _TrackingScreenState extends State<TrackingScreen>
               color: JT.border,
               shape: BoxShape.circle,
               image: photo != null && photo.isNotEmpty
-                  ? DecorationImage(image: NetworkImage(photo), fit: BoxFit.cover)
+                  ? DecorationImage(
+                      image: NetworkImage(photo), fit: BoxFit.cover)
                   : null,
             ),
             child: (photo == null || photo.isEmpty)
-                ? const Icon(Icons.person_rounded, color: Colors.white, size: 30)
+                ? const Icon(Icons.person_rounded,
+                    color: Colors.white, size: 30)
                 : null,
           ),
           const SizedBox(width: 14),
@@ -1360,7 +1747,8 @@ class _TrackingScreenState extends State<TrackingScreen>
                     ),
                     const SizedBox(width: 6),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
                         color: Colors.green[50],
                         borderRadius: BorderRadius.circular(6),
@@ -1368,11 +1756,15 @@ class _TrackingScreenState extends State<TrackingScreen>
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.star_rounded, color: Colors.green, size: 12),
+                          const Icon(Icons.star_rounded,
+                              color: Colors.green, size: 12),
                           const SizedBox(width: 2),
                           Text(
                             rating?.toString() ?? '4.8',
-                            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.green),
+                            style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.green),
                           ),
                         ],
                       ),
@@ -1382,7 +1774,10 @@ class _TrackingScreenState extends State<TrackingScreen>
                 const SizedBox(height: 2),
                 Text(
                   vehicleModel.isNotEmpty ? vehicleModel : 'Jago Pilot',
-                  style: GoogleFonts.poppins(fontSize: 12, color: JT.textSecondary),
+                  style: GoogleFonts.poppins(
+                      fontSize: 12, color: JT.textSecondary),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
@@ -1391,7 +1786,8 @@ class _TrackingScreenState extends State<TrackingScreen>
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(8),
@@ -1408,7 +1804,11 @@ class _TrackingScreenState extends State<TrackingScreen>
                 ),
               ),
               const SizedBox(height: 4),
-              const Text('• Verified Pilot', style: TextStyle(fontSize: 10, color: Colors.blue, fontWeight: FontWeight.w500)),
+              const Text('• Verified Pilot',
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.blue,
+                      fontWeight: FontWeight.w500)),
             ],
           ),
         ],
@@ -1432,11 +1832,17 @@ class _TrackingScreenState extends State<TrackingScreen>
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.chat_bubble_outline_rounded, size: 18, color: JT.textSecondary),
+                  const Icon(Icons.chat_bubble_outline_rounded,
+                      size: 18, color: JT.textSecondary),
                   const SizedBox(width: 10),
-                  Text(
-                    'Message $driverName...',
-                    style: GoogleFonts.poppins(fontSize: 13, color: JT.textSecondary),
+                  Flexible(
+                    child: Text(
+                      'Message $driverName...',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13, color: JT.textSecondary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                 ],
               ),
@@ -1468,7 +1874,8 @@ class _TrackingScreenState extends State<TrackingScreen>
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: const Color(0xFFDC2626), width: 1.2),
             ),
-            child: const Icon(Icons.sos_rounded, color: Color(0xFFDC2626), size: 22),
+            child: const Icon(Icons.sos_rounded,
+                color: Color(0xFFDC2626), size: 22),
           ),
         ),
       ],
@@ -1489,12 +1896,14 @@ class _TrackingScreenState extends State<TrackingScreen>
           const SizedBox(height: 16),
           Text(
             'Finding your Pilot...',
-            style: GoogleFonts.poppins(fontSize: 16, fontWeight: FontWeight.w600, color: color),
+            style: GoogleFonts.poppins(
+                fontSize: 16, fontWeight: FontWeight.w600, color: color),
           ),
           const SizedBox(height: 4),
           Text(
             'Confirming nearest pilot availability',
-            style: GoogleFonts.poppins(fontSize: 12, color: color.withValues(alpha: 0.6)),
+            style: GoogleFonts.poppins(
+                fontSize: 12, color: color.withValues(alpha: 0.6)),
           ),
           const SizedBox(height: 20),
           Row(
@@ -1508,7 +1917,8 @@ class _TrackingScreenState extends State<TrackingScreen>
                     backgroundColor: JT.primary,
                     foregroundColor: Colors.white,
                     elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
               ),
@@ -1556,7 +1966,8 @@ class _TrackingScreenState extends State<TrackingScreen>
 
   Future<void> _shareRide() async {
     final tripId = widget.tripId;
-    final shareText = '🚗 Track my JAGO ride!\nLive location: https://jagopro.org/track/$tripId\nDownload JAGO Pro: https://jagopro.org/download';
+    final shareText =
+        '🚗 Track my JAGO ride!\nLive location: https://jagopro.org/track/$tripId\nDownload JAGO Pro: https://jagopro.org/download';
     final encoded = Uri.encodeComponent(shareText);
     final uri = Uri.parse('whatsapp://send?text=$encoded');
     if (await canLaunchUrl(uri)) {
@@ -1565,8 +1976,8 @@ class _TrackingScreenState extends State<TrackingScreen>
       await Clipboard.setData(ClipboardData(text: shareText));
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Share text copied! Paste in WhatsApp'),
-          backgroundColor: JT.primary));
+            content: Text('Share text copied! Paste in WhatsApp'),
+            backgroundColor: JT.primary));
     }
   }
 
@@ -1574,14 +1985,20 @@ class _TrackingScreenState extends State<TrackingScreen>
     final confirm = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('🚨 SOS Alert', style: TextStyle(fontWeight: FontWeight.w500)),
-        content: const Text('Send an Emergency SOS? Our help team will contact you immediately.'),
+        title: const Text('🚨 SOS Alert',
+            style: TextStyle(fontWeight: FontWeight.w500)),
+        content: const Text(
+            'Send an Emergency SOS? Our help team will contact you immediately.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: JT.primary),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Send SOS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w500))),
+              style: ElevatedButton.styleFrom(backgroundColor: JT.primary),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Send SOS',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w500))),
         ],
       ),
     );
@@ -1598,28 +2015,35 @@ class _TrackingScreenState extends State<TrackingScreen>
           }));
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('🚨 SOS Alert sent! Help is on the way.', style: TextStyle(fontWeight: FontWeight.w400)),
+        content: Text('🚨 SOS Alert sent! Help is on the way.',
+            style: TextStyle(fontWeight: FontWeight.w400)),
         backgroundColor: JT.primary,
         behavior: SnackBarBehavior.floating,
       ));
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('SOS failed. Call 100 immediately!', style: TextStyle(fontWeight: FontWeight.w400)),
+        content: Text('SOS failed. Call 100 immediately!',
+            style: TextStyle(fontWeight: FontWeight.w400)),
         backgroundColor: JT.primaryDark,
         behavior: SnackBarBehavior.floating,
       ));
     }
   }
 
-  Widget _buildFareRow(Map<String, dynamic> trip, dynamic actualFare, dynamic estimatedFare) {
+  Widget _buildFareRow(
+      Map<String, dynamic> trip, dynamic actualFare, dynamic estimatedFare) {
     final fareVal = actualFare ?? estimatedFare;
     final dist = trip['estimatedDistance'] ?? trip['estimated_distance'];
     final vehicle = trip['vehicleName'] ?? trip['vehicle_name'];
     return Wrap(spacing: 8, children: [
-      if (fareVal != null) _chip(Icons.currency_rupee_rounded, '₹$fareVal', const Color(0xFF10B981)),
-      if (dist != null) _chip(Icons.route_rounded, '$dist km', const Color(0xFF6B7280)),
-      if (vehicle != null) _chip(Icons.electric_bike, vehicle.toString(), const Color(0xFF6B7280)),
+      if (fareVal != null)
+        _chip(
+            Icons.currency_rupee_rounded, '₹$fareVal', const Color(0xFF10B981)),
+      if (dist != null)
+        _chip(Icons.route_rounded, '$dist km', const Color(0xFF6B7280)),
+      if (vehicle != null)
+        _chip(Icons.electric_bike, vehicle.toString(), const Color(0xFF6B7280)),
     ]);
   }
 
@@ -1635,81 +2059,151 @@ class _TrackingScreenState extends State<TrackingScreen>
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(icon, size: 13, color: color),
         const SizedBox(width: 5),
-        Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color)),
+        Text(label,
+            style: TextStyle(
+                fontSize: 12, fontWeight: FontWeight.w500, color: color)),
       ]),
     );
   }
 
-  Widget _buildCompletedCard(dynamic actualFare, {double walletPendingAmount = 0}) {
+  Widget _buildCompletedCard(dynamic actualFare,
+      {double walletPendingAmount = 0}) {
+    final from =
+        _trip?['pickupShortName'] ?? _trip?['pickupAddress'] ?? 'Pickup';
+    final to = _trip?['destinationShortName'] ??
+        _trip?['destinationAddress'] ??
+        'Destination';
+
     return Column(children: [
       Container(
         width: double.infinity,
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: JT.primary.withValues(alpha: 0.12), width: 1),
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: const Color(0xFFF1F5F9), width: 1.5),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.05),
-              blurRadius: 20,
-              offset: const Offset(0, 10),
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 30,
+              offset: const Offset(0, 15),
             )
           ],
         ),
         child: Column(children: [
-          // Completion Icon
+          // Header with Gradient
           Container(
-            width: 64,
-            height: 64,
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: const Color(0xFF10B981).withValues(alpha: 0.1),
               shape: BoxShape.circle,
             ),
             child: const Icon(Icons.check_circle_rounded,
-                color: Color(0xFF10B981), size: 36),
+                color: Color(0xFF10B981), size: 40),
           ),
           const SizedBox(height: 16),
-          Text('Ride Completed!',
+          Text('Thank you for choosing Jago!',
               style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700,
-                fontSize: 22,
+                fontSize: 18,
                 color: const Color(0xFF0F172A),
               )),
-          const SizedBox(height: 4),
-          Text('We hope you had a great journey',
+          const SizedBox(height: 6),
+          Text('Your journey has ended safely.',
               style: GoogleFonts.poppins(
-                  fontSize: 14, color: const Color(0xFF64748B))),
+                  fontSize: 13, color: const Color(0xFF64748B))),
 
           const SizedBox(height: 24),
-          const Divider(height: 1),
+          const Divider(height: 1, color: Color(0xFFF1F5F9)),
           const SizedBox(height: 24),
 
-          // Fare Info
-          if (actualFare != null) ...[
-            Text('TOTAL FARE',
-                style: GoogleFonts.poppins(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: const Color(0xFF94A3B8),
-                    letterSpacing: 1)),
-            const SizedBox(height: 6),
-            Text('₹$actualFare',
-                style: GoogleFonts.poppins(
-                  fontSize: 36,
-                  fontWeight: FontWeight.w700,
-                  color: const Color(0xFF0F172A),
-                )),
+          // Route Summary
+          Row(children: [
+            Column(children: [
+              const Icon(Icons.circle, size: 8, color: JT.primary),
+              Container(width: 1, height: 20, color: const Color(0xFFE2E8F0)),
+              const Icon(Icons.location_on_rounded,
+                  size: 14, color: Color(0xFFEF4444)),
+            ]),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  Text(from.toString(),
+                      style: GoogleFonts.poppins(
+                          fontSize: 13, color: const Color(0xFF475569)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 8),
+                  Text(to.toString(),
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: const Color(0xFF0F172A)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                ])),
+          ]),
+
+          const SizedBox(height: 28),
+
+          // Fare Display
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFF),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Final Fare',
+                    style: GoogleFonts.poppins(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: const Color(0xFF64748B))),
+                Text('₹$actualFare',
+                    style: GoogleFonts.poppins(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        color: JT.primaryDark)),
+              ],
+            ),
+          ),
+
+          if (walletPendingAmount > 0) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7ED),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFFED7AA)),
+              ),
+              child: Row(children: [
+                const Icon(Icons.info_outline_rounded,
+                    color: Color(0xFFEA580C), size: 16),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Text(
+                        '₹${walletPendingAmount.toStringAsFixed(2)} to be paid in cash/UPI',
+                        style: GoogleFonts.poppins(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF9A3412)))),
+              ]),
+            ),
           ],
 
           const SizedBox(height: 32),
           // Rating Section
-          Text(_isRatingSubmitted ? 'Thanks for rating!' : 'How was your Pilot?',
+          Text(_isRatingSubmitted ? 'Rating received!' : 'Rate your Pilot',
               style: GoogleFonts.poppins(
-                  fontSize: 16,
+                  fontSize: 15,
                   fontWeight: FontWeight.w600,
                   color: const Color(0xFF1E293B))),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: List.generate(5, (index) {
@@ -1724,31 +2218,35 @@ class _TrackingScreenState extends State<TrackingScreen>
                     : () {
                         _rateDriver(starIndex);
                         setState(() => _isRatingSubmitted = true);
+                        HapticFeedback.heavyImpact();
                       },
-                child: Icon(
-                  isFull ? Icons.star_rounded : Icons.star_outline_rounded,
-                  size: 44,
-                  color: isFull ? const Color(0xFFFFB800) : const Color(0xFFE2E8F0),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Icon(
+                    isFull ? Icons.star_rounded : Icons.star_outline_rounded,
+                    size: 42,
+                    color: isFull
+                        ? const Color(0xFFFFB800)
+                        : const Color(0xFFE2E8F0),
+                  ),
                 ),
               );
             }),
           ),
-          if (!_isRatingSubmitted)
-             Padding(
-               padding: const EdgeInsets.only(top: 8),
-               child: Text('Tap to rate', style: GoogleFonts.poppins(fontSize: 12, color: JT.textTertiary)),
-             ),
         ]),
       ),
-      const SizedBox(height: 20),
+      const SizedBox(height: 24),
       JT.gradientButton(
-        label: 'Back to Home',
-        onTap: () => Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(builder: (_) => const MainScreen()),
-            (_) => false),
+        label: 'Finished',
+        onTap: () {
+          _socket.stopTrackingTrip(widget.tripId);
+          Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(builder: (_) => const MainScreen()),
+              (_) => false);
+        },
       ),
-      const SizedBox(height: 10),
+      const SizedBox(height: 20),
     ]);
   }
 
@@ -1763,13 +2261,17 @@ class _TrackingScreenState extends State<TrackingScreen>
       child: Column(children: [
         const Icon(Icons.cancel_rounded, color: Colors.red, size: 48),
         const SizedBox(height: 12),
-        Text('Trip Cancelled', style: GoogleFonts.poppins(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.red[900])),
+        Text('Trip Cancelled',
+            style: GoogleFonts.poppins(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: Colors.red[900])),
         const SizedBox(height: 16),
-        JT.gradientButton(label: 'Try Again', onTap: () => Navigator.pop(context)),
+        JT.gradientButton(
+            label: 'Try Again', onTap: () => Navigator.pop(context)),
       ]),
     );
   }
-
 
   Map<String, dynamic> _getStatusInfo(String status) {
     switch (status) {
@@ -1782,8 +2284,11 @@ class _TrackingScreenState extends State<TrackingScreen>
       case 'driver_assigned':
       case 'accepted':
         return {
-          'label': _isArriving ? 'Your pilot is about to arrive' : 'Pilot accepted your ride',
-          'icon': _isArriving ? Icons.bolt_rounded : Icons.electric_bike_rounded,
+          'label': _isArriving
+              ? 'Your pilot is about to arrive'
+              : 'Pilot accepted your ride',
+          'icon':
+              _isArriving ? Icons.bolt_rounded : Icons.electric_bike_rounded,
           'color': const Color(0xFF2D8CFF)
         };
       case 'arrived':
@@ -1819,20 +2324,45 @@ class _TrackingScreenState extends State<TrackingScreen>
         };
     }
   }
+
   void _animateToDestination() {
-    final dLat = double.tryParse(_trip?['destinationLat']?.toString() ?? _trip?['destination_lat']?.toString() ?? '');
-    final dLng = double.tryParse(_trip?['destinationLng']?.toString() ?? _trip?['destination_lng']?.toString() ?? '');
-    if (dLat != null && dLng != null && dLat != 0 && _mapController != null) {
-      _mapController!.animateCamera(CameraUpdate.newLatLngZoom(LatLng(dLat, dLng), 15));
-    }
+    Future.delayed(const Duration(milliseconds: 300), () {
+      try {
+        if (!mounted || _trip == null) return;
+        final dLatStr = _trip?['destinationLat']?.toString() ??
+            _trip?['destination_lat']?.toString() ??
+            '';
+        final dLngStr = _trip?['destinationLng']?.toString() ??
+            _trip?['destination_lng']?.toString() ??
+            '';
+
+        final dLat = double.tryParse(dLatStr);
+        final dLng = double.tryParse(dLngStr);
+
+        if (dLat != null &&
+            dLng != null &&
+            dLat != 0 &&
+            dLng != 0 &&
+            _mapController != null) {
+          debugPrint('[MAP] Animating to destination: $dLat, $dLng');
+          _mapController!
+              .animateCamera(CameraUpdate.newLatLngZoom(LatLng(dLat, dLng), 15))
+              .catchError((e) {
+            debugPrint('[MAP] Camera animation failed: $e');
+          });
+        }
+      } catch (e) {
+        debugPrint('[MAP] Error in _animateToDestination: $e');
+      }
+    });
   }
 
   void _showStatusBanner(String message, Color color) {
     if (!mounted) return;
-    
+
     // Cancel existing timer if any
     _bannerTimer?.cancel();
-    
+
     setState(() {
       _bannerMessage = message;
       _bannerColor = color;
@@ -1868,7 +2398,8 @@ class _TrackingScreenState extends State<TrackingScreen>
               color: Colors.white.withValues(alpha: 0.2),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.stars_rounded, color: Colors.white, size: 20),
+            child:
+                const Icon(Icons.stars_rounded, color: Colors.white, size: 20),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -1884,7 +2415,8 @@ class _TrackingScreenState extends State<TrackingScreen>
           ),
           GestureDetector(
             onTap: () => setState(() => _bannerMessage = null),
-            child: Icon(Icons.close_rounded, color: Colors.white.withValues(alpha: 0.7), size: 18),
+            child: Icon(Icons.close_rounded,
+                color: Colors.white.withValues(alpha: 0.7), size: 18),
           ),
         ],
       ),
@@ -1896,9 +2428,11 @@ class _TrackingScreenState extends State<TrackingScreen>
   }
 
   Widget _buildInProgressPanel(Map<String, dynamic> trip) {
-    final dest = trip['destinationShortName'] ?? trip['destinationAddress'] ?? 'Destination';
+    final dest = trip['destinationShortName'] ??
+        trip['destinationAddress'] ??
+        'Destination';
     final dist = trip['estimatedDistance'] ?? trip['estimated_distance'];
-    
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -1913,24 +2447,43 @@ class _TrackingScreenState extends State<TrackingScreen>
             children: [
               Container(
                 padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: Colors.blue.withValues(alpha: 0.12), shape: BoxShape.circle),
-                child: const Icon(Icons.navigation_rounded, color: Colors.blue, size: 20),
+                decoration: BoxDecoration(
+                    color: Colors.blue.withValues(alpha: 0.12),
+                    shape: BoxShape.circle),
+                child: const Icon(Icons.navigation_rounded,
+                    color: Colors.blue, size: 20),
               ),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Heading to', style: GoogleFonts.poppins(fontSize: 12, color: JT.textSecondary)),
-                    Text(dest, style: GoogleFonts.poppins(fontSize: 15, fontWeight: FontWeight.w600, color: JT.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    Text('Heading to',
+                        style: GoogleFonts.poppins(
+                            fontSize: 12, color: JT.textSecondary)),
+                    Text(dest,
+                        style: GoogleFonts.poppins(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: JT.textPrimary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
                   ],
                 ),
               ),
               if (dist != null)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: JT.border)),
-                  child: Text('$dist km', style: GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w700, color: JT.primary)),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: JT.border)),
+                  child: Text('$dist km',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: JT.primary)),
                 ),
             ],
           ),
@@ -1944,7 +2497,11 @@ class _TrackingScreenState extends State<TrackingScreen>
                 children: [
                   _buildLiveDot(),
                   const SizedBox(width: 8),
-                  Text('Trip is in progress', style: GoogleFonts.poppins(fontSize: 12, color: Colors.green, fontWeight: FontWeight.w600)),
+                  Text('Trip is in progress',
+                      style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          color: Colors.green,
+                          fontWeight: FontWeight.w600)),
                 ],
               ),
               const Icon(Icons.security_rounded, color: Colors.blue, size: 18),
@@ -1957,8 +2514,10 @@ class _TrackingScreenState extends State<TrackingScreen>
 
   Widget _buildLiveDot() {
     return Container(
-      width: 8, height: 8,
-      decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+      width: 8,
+      height: 8,
+      decoration:
+          const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
     );
   }
 }

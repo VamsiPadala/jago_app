@@ -141,11 +141,15 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       },
       onError: (error) { firebaseError = error; },
       onAutoVerify: (idToken) async {
-        // Auto-verified (Android only) — log in immediately
-        final res = await AuthService.verifyFirebaseToken(idToken, phone, 'customer');
-        if (mounted && (res['success'] == true || res['token'] != null)) {
-          Navigator.pushAndRemoveUntil(context,
-            MaterialPageRoute(builder: (_) => const MainScreen()), (_) => false);
+        try {
+          // Auto-verified (Android only) — log in immediately
+          final res = await AuthService.verifyFirebaseToken(idToken, phone, 'customer');
+          if (mounted && (res['success'] == true || res['token'] != null)) {
+            Navigator.pushAndRemoveUntil(context,
+              MaterialPageRoute(builder: (_) => const MainScreen()), (_) => false);
+          }
+        } catch (e) {
+          debugPrint('Auto-verify error: $e');
         }
       },
     );

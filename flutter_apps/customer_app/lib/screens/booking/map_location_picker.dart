@@ -410,6 +410,49 @@ class _MapLocationPickerState extends State<MapLocationPicker> {
           if (_locationLoading)
             const Center(child: CircularProgressIndicator()),
 
+          // ── Center Map Pointer ─────────────────────────────────────────
+          if (!_locationLoading && _lat != null && _lng != null)
+            IgnorePointer(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 240),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Floating Icon
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        margin: const EdgeInsets.only(bottom: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.8),
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: [
+                            BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 10, offset: const Offset(0, 4)),
+                          ],
+                        ),
+                        child: Text(
+                          _geocoding ? 'Loading...' : 'Set Location Here',
+                          style: GoogleFonts.poppins(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      const Icon(Icons.location_on, size: 48, color: JT.primary),
+                      // Small dot representing the exact coordinate
+                      Container(
+                        width: 8, height: 4,
+                        margin: const EdgeInsets.only(top: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.3),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      // Spacer to ensure the dot rests at the exact vertical center
+                      const SizedBox(height: 80), 
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
         // ── Top layer (Search or Title) ──────────────────────────────
         Positioned(
           top: 0,

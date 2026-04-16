@@ -3,12 +3,12 @@ class ApiConfig {
   static const String compileTimeBaseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: '');
 
   // Production server URL
-  static const String _prodUrl = 'https://oyster-app-9e9cd.ondigitalocean.app';
+  static const String _prodUrl = 'http://64.227.184.142:3000';
 
-  // LAN IP for local testing only (Update this to your computer's IP: 192.168.1.37)
-  static const String _lanDevUrl = 'http://192.168.1.151:5000'; // 10.0.2.2 for Android Emulator
+  // For Android Emulator use 10.0.2.2. For Physical Device use your PC's IP (e.g. 192.168.0.x)
+  static const String _lanDevUrl = 'http://192.168.1.89:5000'; // Target specific physical IP
 
-  static bool _isProd = false; // DEVELOPMENT BUILD
+  static bool _isProd = true; // PRODUCTION BUILD
 
   static String get baseUrl {
     if (compileTimeBaseUrl.isNotEmpty) {
@@ -23,7 +23,7 @@ class ApiConfig {
 
   // Set at build time: --dart-define=GOOGLE_MAPS_KEY=AIzaSy...
   // Never hardcode — key must be rotated in Google Cloud Console
-  static const String googleMapsApiKey = String.fromEnvironment('GOOGLE_MAPS_KEY', defaultValue: 'AIzaSyAiMVYA_ppxeT344tkcoSsjeGGMaPU26eI');
+  static const String googleMapsApiKey = String.fromEnvironment('GOOGLE_MAPS_KEY', defaultValue: 'AIzaSyDj3UNBM04zhLbnKrYQa_8WQ9anNXhOcY4');
 
   // Socket.IO base URL (same server, no path)
   static String get socketUrl => baseUrl;

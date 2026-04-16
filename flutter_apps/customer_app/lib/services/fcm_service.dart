@@ -25,56 +25,77 @@ class FcmService {
     if (_initialized) return;
     _initialized = true;
 
-    // Request permission
-    final messaging = FirebaseMessaging.instance;
-    await messaging.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
+    try {
+      // Request permission
+      final messaging = FirebaseMessaging.instance;
+      await messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      ).timeout(const Duration(seconds: 10), onTimeout: () => const NotificationSettings(
+        alert: AppleNotificationSetting.disabled,
+        announcement: AppleNotificationSetting.disabled,
+        authorizationStatus: AuthorizationStatus.notDetermined,
+        badge: AppleNotificationSetting.disabled,
+        carPlay: AppleNotificationSetting.disabled,
+        lockScreen: AppleNotificationSetting.disabled,
+        notificationCenter: AppleNotificationSetting.disabled,
+        showPreviews: AppleShowPreviewSetting.never,
+        sound: AppleNotificationSetting.disabled,
+        criticalAlert: AppleNotificationSetting.disabled,
+        timeSensitive: AppleNotificationSetting.disabled,
+        providesAppNotificationSettings: AppleNotificationSetting.disabled,
+      ));
 
-    // Android notification channels
-    const AndroidNotificationChannel driverChannel = AndroidNotificationChannel(
-      'trip_updates',
-      'Trip Updates',
-      description: 'Driver assignment, arrival, and trip status updates',
-      importance: Importance.max,
-      playSound: true,
-      enableVibration: true,
-    );
+      // Android notification channels
+      const AndroidNotificationChannel driverChannel = AndroidNotificationChannel(
+        'trip_updates',
+        'Trip Updates',
+        description: 'Driver assignment, arrival, and trip status updates',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+      );
 
-    await _localNotif
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(driverChannel);
+      await _localNotif
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          ?.createNotificationChannel(driverChannel);
 
-    // Init local notifications
-    const initSettings = InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      iOS: DarwinInitializationSettings(
-        requestAlertPermission: false,
-        requestBadgePermission: false,
-        requestSoundPermission: false,
-      ),
-    );
-    await _localNotif.initialize(initSettings,
-      onDidReceiveNotificationResponse: _onNotifTap);
+      // Init local notifications
+      const initSettings = InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: DarwinInitializationSettings(
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
+      );
+      await _localNotif.initialize(initSettings,
+        onDidReceiveNotificationResponse: _onNotifTap);
 
-    // Register background handler
-    FirebaseMessaging.onBackgroundMessage(firebaseBackgroundMessageHandler);
+      // Register background handler
+      FirebaseMessaging.onBackgroundMessage(firebaseBackgroundMessageHandler);
 
-    // Foreground notifications
-    FirebaseMessaging.onMessage.listen(_onForegroundMessage);
+      // Foreground notifications
+      FirebaseMessaging.onMessage.listen(_onForegroundMessage);
 
-    // App opened from background notification
-    FirebaseMessaging.onMessageOpenedApp.listen(_onNotificationOpened);
+      // App opened from background notification
+      FirebaseMessaging.onMessageOpenedApp.listen(_onNotificationOpened);
 
-    // App launched from terminated notification
-    final initial = await messaging.getInitialMessage();
-    if (initial != null) _handleMessage(initial);
+      // App launched from terminated notification
+      try {
+        final initial = await messaging.getInitialMessage();
+        if (initial != null) _handleMessage(initial);
+      } catch (e) {
+        debugPrint('[FCM-CUSTOMER] getInitialMessage error: $e');
+      }
 
-    // Save token
-    await _saveFcmToken();
-    messaging.onTokenRefresh.listen(_saveTokenToServer);
+      // Save token
+      _saveFcmToken(); // Run in background, don't await indefinitely
+      messaging.onTokenRefresh.listen(_saveTokenToServer);
+    } catch (e) {
+      debugPrint('[FCM-CUSTOMER] ❌ Fatal error during FcmService.init(): $e');
+    }
   }
 
   Future<void> _saveFcmToken() async {
